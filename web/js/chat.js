@@ -14,11 +14,9 @@ const state = {
   sessionId: null,          // loaded after project is resolved
   project: null,            // loaded from URL, fallback to first project
   processing: false,
-  stageBuffer: [],      // buffered tool_use blocks for current stage
-  liveGroupEl: null,    // DOM ref to current live tool group
-  liveBodyEl: null,     // DOM ref to body of live tool group
-  thinkingBuffer: [],   // buffered consecutive thinking blocks
-  thinkingGroupEl: null,// DOM ref to current live thinking group
+  sequenceBuffer: [],
+  tagDetailsEl: {},
+  currentTagRow: null,
   sessionNames: {},     // sessionId -> customName
   todos: [],            // { id, text, done }
   sessionStatus: {}     // sessionId -> last status string
@@ -245,11 +243,9 @@ async function switchSession(sessionId) {
   messagesEl.innerHTML = '';
   state.processing = false;
   sendBtn.disabled = false;
-  state.stageBuffer = [];
-  state.liveGroupEl = null;
-  state.liveBodyEl = null;
-  state.thinkingBuffer = [];
-  state.thinkingGroupEl = null;
+  state.sequenceBuffer = [];
+  state.tagDetailsEl = {};
+  state.currentTagRow = null;
 
   sessionList.querySelectorAll('.session-item').forEach(el => {
     el.classList.toggle('active', el.dataset.sessionId === sessionId);
@@ -272,11 +268,9 @@ newSessionBtn.addEventListener('click', () => {
   messagesEl.innerHTML = '';
   state.processing = false;
   sendBtn.disabled = false;
-  state.stageBuffer = [];
-  state.liveGroupEl = null;
-  state.liveBodyEl = null;
-  state.thinkingBuffer = [];
-  state.thinkingGroupEl = null;
+  state.sequenceBuffer = [];
+  state.tagDetailsEl = {};
+  state.currentTagRow = null;
   showEmptyState();
   sessionList.querySelectorAll('.session-item').forEach(el => el.classList.remove('active'));
 });
@@ -288,10 +282,7 @@ async function loadSessionHistory(sessionId) {
     for (const msg of messages) {
       if (!msg.blocks) continue;
       if (msg.role === 'user') {
-        const hasUserText = msg.blocks.some(b => b.type === 'text' && b.text);
-        if (hasUserText) {
-          flushThinkingGroup();
-        }
+        flushSequenceBuffer();
         for (const block of msg.blocks) {
           if (block.type === 'text' && block.text) {
             addMessage('user', block.text);
@@ -302,24 +293,20 @@ async function loadSessionHistory(sessionId) {
         for (const block of msg.blocks) {
           switch (block.type) {
             case 'thinking':
-              state.thinkingBuffer.push(block.thinking || '(思考中)');
-              if (!state.thinkingGroupEl) createLiveThinkingGroup();
-              else updateLiveThinkingGroup();
+              appendSequenceBlock('thinking', block.thinking || '(思考中)');
               break;
             case 'text':
-              flushThinkingGroup();
-              flushToolGroup();
+              flushSequenceBuffer();
               addMessage('assistant', block.text);
               break;
             case 'tool_use':
-              state.stageBuffer.push(block);
+              appendSequenceBlock('tool_use', block);
               break;
           }
         }
       }
     }
-    flushThinkingGroup();
-    flushToolGroup();
+    flushSequenceBuffer();
   } catch (e) {
     console.error('Failed to load session history', e);
     addMessage('error', '加载历史消息失败');
@@ -384,17 +371,15 @@ function sendMessage() {
   state.processing = true;
   sendBtn.disabled = true;
   setStatus('processing');
-  state.stageBuffer = [];
-  state.liveGroupEl = null;
-  state.liveBodyEl = null;
-  state.thinkingBuffer = [];
-  state.thinkingGroupEl = null;
+  state.sequenceBuffer = [];
+  state.tagDetailsEl = {};
+  state.currentTagRow = null;
 
   addProcessing();
 
   const watchdog = setTimeout(() => {
     if (state.processing) {
-      flushToolGroup();
+      flushSequenceBuffer();
       removeProcessing();
       state.processing = false;
       sendBtn.disabled = false;
@@ -453,8 +438,7 @@ function handleEvent(event) {
         break;
 
       case 'result':
-        flushThinkingGroup();
-        flushToolGroup();
+        flushSequenceBuffer();
         stopProcessing();
         setStatus('done');
         setTimeout(() => { if (!state.processing) setStatus('idle'); }, 1500);
@@ -464,8 +448,7 @@ function handleEvent(event) {
         break;
 
       case 'error':
-        flushThinkingGroup();
-        flushToolGroup();
+        flushSequenceBuffer();
         stopProcessing();
         setStatus('error');
         setTimeout(() => { if (!state.processing) setStatus('idle'); }, 2000);
@@ -473,8 +456,7 @@ function handleEvent(event) {
         break;
 
       case 'done':
-        flushThinkingGroup();
-        flushToolGroup();
+        flushSequenceBuffer();
         stopProcessing();
         setStatus('idle');
         refreshSessionList();
@@ -482,8 +464,7 @@ function handleEvent(event) {
     }
   } catch (e) {
     console.error('handleEvent error for type:', type, e);
-    flushThinkingGroup();
-    flushToolGroup();
+    flushSequenceBuffer();
     stopProcessing();
   }
 }
@@ -503,28 +484,183 @@ function handleAssistantEvent(event) {
     switch (block.type) {
       case 'thinking':
         setStatus('thinking');
-        state.thinkingBuffer.push(block.thinking || '(思考中)');
-        if (!state.thinkingGroupEl) {
-          createLiveThinkingGroup();
-        } else {
-          updateLiveThinkingGroup();
-        }
+        appendSequenceBlock('thinking', block.thinking || '(思考中)');
         break;
       case 'text':
         setStatus('streaming');
-        flushThinkingGroup();
-        flushToolGroup();
+        flushSequenceBuffer();
         addMessage('assistant', block.text);
         break;
       case 'tool_use':
         setStatus('tool_run');
-        state.stageBuffer.push(block);
-        if (!state.liveGroupEl) {
-          createLiveToolGroup(block);
-        } else {
-          appendLiveTool(block);
-        }
+        appendSequenceBlock('tool_use', block);
         break;
+    }
+  }
+}
+
+function appendSequenceBlock(type, data) {
+  const last = state.sequenceBuffer.length > 0
+    ? state.sequenceBuffer[state.sequenceBuffer.length - 1]
+    : null;
+
+  if (last && last.type === type) {
+    last.blocks.push(data);
+    updateLiveTagRow();
+  } else {
+    state.sequenceBuffer.push({ type: type, blocks: [data] });
+    renderLiveTagRow();
+  }
+}
+
+function renderLiveTagRow() {
+  if (state.currentTagRow) {
+    state.currentTagRow.remove();
+    state.currentTagRow = null;
+    state.tagDetailsEl = {};
+  }
+
+  const row = document.createElement('div');
+  row.className = 'inline-tag-row';
+  row.id = 'liveTagRow';
+
+  state.tagDetailsEl = {};
+  const detailsContainer = document.createElement('div');
+  detailsContainer.style.width = '100%';
+
+  for (let i = 0; i < state.sequenceBuffer.length; i++) {
+    const entry = state.sequenceBuffer[i];
+    if (i > 0) {
+      const sep = document.createElement('span');
+      sep.className = 'tag-separator';
+      sep.textContent = '▸';
+      row.appendChild(sep);
+    }
+
+    const tag = document.createElement('span');
+    tag.className = 'inline-tag';
+    const tagId = 'liveTag-' + i;
+
+    if (entry.type === 'thinking') {
+      tag.innerHTML = '<span class="tag-icon">\u{1F4AD}</span><span class="tag-label">思考过程</span><span class="tag-count">' + entry.blocks.length + '条</span>';
+    } else {
+      tag.innerHTML = '<span class="tag-icon">\u{1F527}</span><span class="tag-label">工具调用</span><span class="tag-count">' + entry.blocks.length + '次</span>';
+    }
+
+    const detail = document.createElement('div');
+    detail.className = 'inline-tag-detail';
+    detail.id = tagId + '-detail';
+    populateDetailItems(detail, entry);
+
+    tag.addEventListener('click', () => {
+      tag.classList.toggle('expanded');
+      detail.classList.toggle('visible');
+    });
+
+    row.appendChild(tag);
+    state.tagDetailsEl[tagId] = { tag: tag, detail: detail, entry: entry };
+    detailsContainer.appendChild(detail);
+  }
+
+  state.currentTagRow = row;
+  insertBeforeProcessing(row);
+  insertBeforeProcessing(detailsContainer);
+}
+
+function updateLiveTagRow() {
+  if (!state.currentTagRow) {
+    renderLiveTagRow();
+    return;
+  }
+
+  for (let i = 0; i < state.sequenceBuffer.length; i++) {
+    const entry = state.sequenceBuffer[i];
+    const tagId = 'liveTag-' + i;
+    const refs = state.tagDetailsEl[tagId];
+    if (!refs) { renderLiveTagRow(); return; }
+
+    const countEl = refs.tag.querySelector('.tag-count');
+    if (countEl) {
+      countEl.textContent = entry.type === 'thinking'
+        ? entry.blocks.length + '条'
+        : entry.blocks.length + '次';
+    }
+
+    refs.detail.innerHTML = '';
+    populateDetailItems(refs.detail, entry);
+  }
+}
+
+function populateDetailItems(container, entry) {
+  entry.blocks.forEach((block, idx) => {
+    const item = document.createElement('div');
+    item.className = 'tag-detail-item ' + (entry.type === 'thinking' ? 'type-thinking' : 'type-tool');
+
+    const idxSpan = document.createElement('span');
+    idxSpan.className = 'detail-index';
+    idxSpan.textContent = '#' + (idx + 1);
+
+    const summary = document.createElement('span');
+    summary.className = 'detail-summary';
+
+    if (entry.type === 'thinking') {
+      summary.textContent = generateThinkingSummary(block);
+      const full = document.createElement('div');
+      full.className = 'detail-full';
+      full.textContent = block;
+      item.appendChild(idxSpan);
+      item.appendChild(summary);
+      item.appendChild(full);
+    } else {
+      const icon = TOOL_ICONS[block.name] || '\u{1F527}';
+      const detail = getToolDetail(block);
+      summary.textContent = icon + ' ' + block.name + ' ' + detail;
+      item.appendChild(idxSpan);
+      item.appendChild(summary);
+    }
+
+    item.addEventListener('click', () => {
+      item.classList.toggle('expanded');
+    });
+
+    container.appendChild(item);
+  });
+}
+
+function flushSequenceBuffer() {
+  if (state.sequenceBuffer.length === 0) return;
+
+  const allTools = [];
+  const modifiedFiles = [];
+  for (const entry of state.sequenceBuffer) {
+    if (entry.type === 'tool_use') {
+      for (const tool of entry.blocks) {
+        allTools.push(tool);
+        if ((tool.name === 'Write' || tool.name === 'Edit') && tool.input && tool.input.file_path) {
+          modifiedFiles.push(tool.input.file_path);
+        }
+      }
+    }
+  }
+
+  if (state.currentTagRow) {
+    state.currentTagRow.removeAttribute('id');
+    state.currentTagRow = null;
+  }
+  for (const refs of Object.values(state.tagDetailsEl)) {
+    refs.detail.removeAttribute('id');
+  }
+  state.tagDetailsEl = {};
+  state.sequenceBuffer = [];
+
+  if (modifiedFiles.length > 0) {
+    for (const file of modifiedFiles) {
+      const fcDiv = document.createElement('div');
+      fcDiv.className = 'msg assistant';
+      fcDiv.style.alignSelf = 'stretch';
+      fcDiv.style.maxWidth = '85%';
+      fcDiv.innerHTML = '<div class="file-changes"><span class="fc-file">\u{1F4DD} ' + escapeHtml(file.replace(/^.*[\\/]/, '')) + '</span></div>';
+      insertBeforeProcessing(fcDiv);
     }
   }
 }
