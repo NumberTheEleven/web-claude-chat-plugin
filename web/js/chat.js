@@ -258,6 +258,7 @@ async function switchSession(sessionId) {
   addProcessing();
   await loadSessionHistory(sessionId);
   removeProcessing();
+  refreshHistory();
   addMessage('system', `已切换到会话 ${sessionId.substring(0, 8)}...`);
 }
 
@@ -272,6 +273,7 @@ newSessionBtn.addEventListener('click', () => {
   state.tagDetailsEl = {};
   state.currentTagRow = null;
   showEmptyState();
+  refreshHistory();
   sessionList.querySelectorAll('.session-item').forEach(el => el.classList.remove('active'));
 });
 
@@ -307,6 +309,7 @@ async function loadSessionHistory(sessionId) {
       }
     }
     flushSequenceBuffer();
+    refreshHistory();
   } catch (e) {
     console.error('Failed to load session history', e);
     addMessage('error', '加载历史消息失败');
@@ -1040,6 +1043,10 @@ function addMessage(type, text) {
   }
   div.appendChild(bubble);
 
+  if (type === 'user') {
+    setTimeout(refreshHistory, 0);
+  }
+
   insertBeforeProcessing(div);
   return div;
 }
@@ -1716,6 +1723,34 @@ todoInput.addEventListener('keydown', (e) => {
     todoInput.value = '';
   }
 });
+
+// ====== Question history ======
+function refreshHistory() {
+  historyList.innerHTML = '';
+  const userMsgs = messagesEl.querySelectorAll('.msg.user');
+  if (userMsgs.length === 0) {
+    historyList.innerHTML = '<div class="history-empty">暂无提问记录</div>';
+    return;
+  }
+  userMsgs.forEach((msgEl, idx) => {
+    const text = msgEl.textContent.trim();
+    const truncated = text.length > 20 ? text.substring(0, 20) + '...' : text;
+    const item = document.createElement('div');
+    item.className = 'history-item';
+    item.title = text;
+    item.textContent = truncated;
+
+    item.addEventListener('click', () => {
+      msgEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      msgEl.classList.remove('highlight-flash');
+      void msgEl.offsetWidth;
+      msgEl.classList.add('highlight-flash');
+      setTimeout(() => msgEl.classList.remove('highlight-flash'), 2000);
+    });
+
+    historyList.appendChild(item);
+  });
+}
 
 // ====== Init ======
 loadTodos();
