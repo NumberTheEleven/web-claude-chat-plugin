@@ -45,6 +45,7 @@ const todoInput = document.getElementById('todoInput');
 const todoAddBtn = document.getElementById('todoAddBtn');
 const statusBar = document.getElementById('statusBar');
 const cmdDropdown = document.getElementById('cmdDropdown');
+const historyList = document.getElementById('historyList');
 
 const SLASH_COMMANDS = [
   { cmd: '/superpowers:brainstorming', desc: '头脑风暴，将想法转化为设计文档' },
@@ -65,6 +66,18 @@ function cmdDropdownVisible() {
 function validSessionId(id) {
   if (!id || id === 'undefined' || id === 'null') return null;
   return id;
+}
+
+function formatDuration(ms) {
+  if (ms == null) return '';
+  const hours = Math.floor(ms / 3600000);
+  const minutes = Math.floor((ms % 3600000) / 60000);
+  const seconds = Math.floor((ms % 60000) / 1000);
+  const parts = [];
+  if (hours > 0) parts.push(hours + '小时');
+  if (minutes > 0) parts.push(minutes + '分钟');
+  if (seconds > 0 || parts.length === 0) parts.push(seconds + '秒');
+  return parts.join(' ');
 }
 
 // ====== Project picker ======
