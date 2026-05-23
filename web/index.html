@@ -52,17 +52,25 @@
       <textarea id="userInput" rows="2" placeholder="输入消息... (Enter 发送, Shift+Enter 换行)" autofocus></textarea>
       <button id="sendBtn" title="发送 (Enter)">发送</button>
     </footer>
+  </div>
 
-    <!-- Sticky Note Todo -->
-    <div id="todoSticky" class="sticky-note">
-      <div class="sticky-title">待办事项</div>
+  <!-- Right Tool Panel -->
+  <aside id="toolPanel">
+    <div class="panel-section">
+      <div class="panel-section-title">待办事项</div>
       <div class="todo-items" id="todoList"></div>
       <div class="todo-add-row">
         <input type="text" id="todoInput" class="todo-input" placeholder="添加待办..." autocomplete="off">
         <button id="todoAddBtn" class="btn-todo-add">+</button>
       </div>
     </div>
-  </div>
+    <div class="panel-section panel-section-history">
+      <div class="panel-section-title">提问历史</div>
+      <div class="history-list" id="historyList">
+        <div class="history-empty">暂无提问记录</div>
+      </div>
+    </div>
+  </aside>
 
 </div>
 
