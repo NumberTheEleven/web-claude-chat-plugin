@@ -443,7 +443,7 @@ function handleEvent(event) {
         setStatus('done');
         setTimeout(() => { if (!state.processing) setStatus('idle'); }, 1500);
         if (event.subtype === 'success') {
-          addMessage('result', `完成 · ${event.num_turns || 1} 轮 · ${event.duration_ms || 0}ms`);
+          renderCompletionBar(event.num_turns || 1, event.duration_ms || 0);
         }
         break;
 
@@ -1457,6 +1457,21 @@ function generateThinkingSummary(text) {
 
 function escapeHtml(text) {
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function renderCompletionBar(numTurns, durationMs) {
+  const bar = document.createElement('div');
+  bar.className = 'msg assistant completion-bar';
+  bar.style.alignSelf = 'stretch';
+  bar.style.maxWidth = '100%';
+  bar.innerHTML =
+    '<span class="comp-icon">✅</span>' +
+    '<span>本轮完成</span>' +
+    '<span class="comp-divider"></span>' +
+    '<span class="comp-stat">' + numTurns + '轮对话</span>' +
+    '<span class="comp-sep">·</span>' +
+    '<span class="comp-stat">' + formatDuration(durationMs) + '</span>';
+  insertBeforeProcessing(bar);
 }
 
 // ====== Slash command autocomplete ======
