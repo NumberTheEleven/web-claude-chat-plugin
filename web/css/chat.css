@@ -1,27 +1,49 @@
 :root {
-  --bg: #fafaf9;
-  --card-bg: #ffffff;
-  --text: #1c1917;
-  --text-secondary: #57534e;
-  --text-muted: #a8a29e;
-  --border: #e7e5e4;
-  --accent: #818cf8;
-  --accent-light: #eef2ff;
-  --accent-text: #4338ca;
-  --green-bg: #ecfdf5;
-  --green-text: #064e3b;
-  --amber-bg: #fffbeb;
-  --amber-border: #fcd34d;
-  --amber-text: #92400e;
-  --red-bg: #fef2f2;
-  --red-text: #991b1b;
-  --radius: 10px;
-  --radius-sm: 6px;
-  --shadow: 0 1px 3px rgba(0,0,0,0.06);
+  --bg: #0d1117;
+  --card-bg: #0a0e14;
+  --text: #c9d1d9;
+  --text-secondary: #8b949e;
+  --text-muted: #484f58;
+  --border: #21262d;
+  --accent: #2563eb;
+  --accent-green: #05b6a2;
+  --accent-light: rgba(37,99,235,0.08);
+  --accent-text: #58a6ff;
+  --gradient: linear-gradient(135deg, #2563eb 0%, #05b6a2 100%);
+  --green-bg: rgba(5,182,162,0.08);
+  --green-text: #05b6a2;
+  --amber-bg: rgba(210,153,34,0.08);
+  --amber-border: #d29922;
+  --amber-text: #d29922;
+  --red-bg: rgba(248,81,73,0.08);
+  --red-text: #f85149;
+  --radius: 0px;
+  --radius-sm: 0px;
+  --shadow: none;
   --sidebar-w: 280px;
+  --toolpanel-w: 220px;
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
+
+/* ====== Global square-corner overrides ====== */
+input, textarea, select, button,
+.msg-bubble, .session-item, .tool-group,
+.diff-block, .decision-card, .file-changes,
+.code-block, .md-table-wrap, .cmd-dropdown,
+.cmd-item, .todo-item, .todo-checkbox,
+.todo-input, .btn-todo-add, .btn-new-session,
+.session-rename-input {
+  border-radius: 0 !important;
+}
+
+/* Decoration bar: thin vertical bar on the left edge */
+.bar-left {
+  border-left: 3px solid var(--accent);
+}
+.bar-left-green {
+  border-left: 3px solid var(--accent-green);
+}
 
 body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
