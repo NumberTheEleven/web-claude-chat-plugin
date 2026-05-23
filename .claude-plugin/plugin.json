@@ -1,0 +1,8 @@
+{
+  "name": "claude-chat",
+  "version": "0.1.0",
+  "description": "Browser-based chat UI for Claude Code sessions. Continue CLI conversations in a rich web interface with multi-tab project isolation, markdown rendering, todo tracking, and slash command autocomplete.",
+  "author": {
+    "name": "BodyQuest"
+  }
+}

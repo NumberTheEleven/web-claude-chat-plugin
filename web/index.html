@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Claude Chat</title>
+<link rel="stylesheet" href="/css/chat.css">
+</head>
+<body>
+<div id="app">
+  <!-- Sidebar -->
+  <aside id="sidebar">
+    <div class="sidebar-header">
+      <span class="logo">Claude Chat</span>
+    </div>
+
+    <div class="sidebar-section">
+      <label class="sidebar-label">项目目录</label>
+      <select id="projectPicker" title="选择项目目录">
+        <option value="">加载中...</option>
+      </select>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="sidebar-label-row">
+        <span class="sidebar-label">会话列表</span>
+        <button id="newSessionBtn" class="btn-new-session" title="新建会话">+</button>
+      </div>
+      <div id="sessionList" class="session-list"></div>
+    </div>
+  </aside>
+
+  <!-- Main -->
+  <div id="mainArea">
+    <!-- Header -->
+    <header id="header">
+      <span class="session-id" id="sessionDisplay">新会话</span>
+    </header>
+
+    <!-- Messages -->
+    <main id="messages"></main>
+
+    <!-- Status Bar -->
+    <div id="statusBar" class="status-bar status-idle">
+      <span class="status-dot"></span>
+      <span class="status-text">就绪</span>
+    </div>
+
+    <!-- Input -->
+    <footer id="inputArea">
+      <div id="cmdDropdown" class="cmd-dropdown hidden"></div>
+      <textarea id="userInput" rows="2" placeholder="输入消息... (Enter 发送, Shift+Enter 换行)" autofocus></textarea>
+      <button id="sendBtn" title="发送 (Enter)">发送</button>
+    </footer>
+
+    <!-- Sticky Note Todo -->
+    <div id="todoSticky" class="sticky-note">
+      <div class="sticky-title">待办事项</div>
+      <div class="todo-items" id="todoList"></div>
+      <div class="todo-add-row">
+        <input type="text" id="todoInput" class="todo-input" placeholder="添加待办..." autocomplete="off">
+        <button id="todoAddBtn" class="btn-todo-add">+</button>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script src="/js/chat.js"></script>
+</body>
+</html>
