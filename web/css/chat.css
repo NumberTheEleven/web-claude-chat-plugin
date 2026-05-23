@@ -188,7 +188,6 @@ body {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  position: relative;
 }
 
 /* ====== Header ====== */
@@ -279,7 +278,6 @@ body {
   flex: 1;
   overflow-y: auto;
   padding: 20px;
-  padding-right: 290px;
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -607,38 +605,6 @@ body {
   border-radius: 3px;
 }
 
-/* ====== Sticky Note Todo ====== */
-.sticky-note {
-  position: absolute;
-  top: 52px;
-  right: 16px;
-  width: 250px;
-  min-height: 280px;
-  max-height: 400px;
-  background: linear-gradient(175deg, #fef9c3 0%, #fff9c4 30%, #fef08a 100%);
-  border: 1px solid #fde047;
-  border-radius: 2px 2px 8px 2px;
-  box-shadow: 2px 2px 6px rgba(0,0,0,0.08), 3px 3px 0 rgba(253,224,71,0.3);
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  z-index: 10;
-  transition: box-shadow 0.15s ease;
-}
-.sticky-note:hover {
-  box-shadow: 2px 3px 10px rgba(0,0,0,0.12), 3px 4px 0 rgba(253,224,71,0.4);
-}
-
-.sticky-title {
-  font-size: 16px;
-  font-weight: 700;
-  color: #713f12;
-  padding: 10px 14px 6px;
-  font-family: "Comic Sans MS", "KaiTi", "STKaiti", cursive, sans-serif;
-  letter-spacing: 0.5px;
-  flex-shrink: 0;
-}
-
 /* Todo items (panel-embedded, same component styling) */
 .todo-items {
   overflow-y: auto;
@@ -915,4 +881,57 @@ h6.md-heading { font-size: 12px; }
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* ====== Right Tool Panel ====== */
+#toolPanel {
+  width: var(--toolpanel-w);
+  min-width: var(--toolpanel-w);
+  background: var(--card-bg);
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.panel-section {
+  padding: 10px 10px 6px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+}
+
+.panel-section-history {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.panel-section-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+
+/* Override for panel-embedded todo */
+.todo-items {
+  padding: 0;
+  gap: 2px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.todo-add-row {
+  padding: 6px 0 0;
+  border-top: none;
+  background: transparent;
+}
+
+.todo-input {
+  background: var(--bg);
+  color: var(--text);
 }
