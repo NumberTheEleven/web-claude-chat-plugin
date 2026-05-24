@@ -11,15 +11,21 @@ function projectStorageKey(base) {
 // ====== State ======
 const state = {
   ws: null,
-  sessionId: null,          // loaded after project is resolved
-  project: null,            // loaded from URL, fallback to first project
+  sessionId: null,
+  project: null,
   processing: false,
   sequenceBuffer: [],
   tagDetailsEl: {},
   currentTagRow: null,
-  sessionNames: {},     // sessionId -> customName
-  todos: [],            // { id, text, done }
-  sessionStatus: {}     // sessionId -> last status string
+  sessionNames: {},
+  todos: [],
+  sessionStatus: {},
+  // Question-index-based navigation
+  oldestQuestionIndex: null,    // index of the oldest question currently displayed
+  questions: [],                // loaded questions for right panel {index, preview, text}
+  questionsTotal: 0,
+  questionsHasMore: false,
+  _metaWrapper: null
 };
 
 // Tool icons map
@@ -108,6 +114,7 @@ async function loadProjects() {
     // Now that project is resolved, load session from project-scoped storage
     state.sessionId = validSessionId(localStorage.getItem(projectStorageKey('session')));
     loadTodos();
+    renderTodos();
     updateSessionDisplay();
   } catch (e) {
     console.error('Failed to load projects', e);
@@ -160,35 +167,64 @@ async function refreshSessionList() {
       sessionList.innerHTML = '<div style="padding:8px 12px;color:var(--text-muted);font-size:12px;">暂无会话</div>';
       return;
     }
-    sessions.forEach(s => {
-      const div = document.createElement('div');
-      div.className = 'session-item';
-      div.dataset.sessionId = s.sessionId;
-      if (s.sessionId === state.sessionId) div.classList.add('active');
 
-      const displayName = s.customName || state.sessionNames[s.sessionId] || s.preview || '(空)';
-      const isCustom = !!(s.customName || state.sessionNames[s.sessionId]);
+    // Group by time period
+    const now = new Date();
+    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const yesterdayStart = new Date(todayStart - 86400000);
+    const weekStart = new Date(todayStart - 6 * 86400000);
 
-      const preview = document.createElement('div');
-      preview.className = 'session-item-preview';
-      preview.textContent = displayName;
-      if (isCustom) preview.classList.add('custom-named');
+    const groups = [
+      { label: '今天', sessions: [] },
+      { label: '昨天', sessions: [] },
+      { label: '本周', sessions: [] },
+      { label: '更早', sessions: [] }
+    ];
 
-      const idSpan = document.createElement('div');
-      idSpan.className = 'session-item-id';
-      idSpan.textContent = s.sessionId.substring(0, 8);
+    for (const s of sessions) {
+      const d = new Date(s.lastModified);
+      if (d >= todayStart) groups[0].sessions.push(s);
+      else if (d >= yesterdayStart) groups[1].sessions.push(s);
+      else if (d >= weekStart) groups[2].sessions.push(s);
+      else groups[3].sessions.push(s);
+    }
 
-      // Double-click to rename
-      div.addEventListener('dblclick', (e) => {
-        e.stopPropagation();
-        startRename(div, s.sessionId);
+    for (const group of groups) {
+      if (group.sessions.length === 0) continue;
+      const sep = document.createElement('div');
+      sep.className = 'session-time-separator';
+      sep.textContent = group.label;
+      sessionList.appendChild(sep);
+
+      group.sessions.forEach(s => {
+        const div = document.createElement('div');
+        div.className = 'session-item';
+        div.dataset.sessionId = s.sessionId;
+        if (s.sessionId === state.sessionId) div.classList.add('active');
+
+        const displayName = s.customName || state.sessionNames[s.sessionId] || s.preview || '(空)';
+        const isCustom = !!(s.customName || state.sessionNames[s.sessionId]);
+
+        const preview = document.createElement('div');
+        preview.className = 'session-item-preview';
+        preview.textContent = displayName;
+        if (isCustom) preview.classList.add('custom-named');
+
+        const idSpan = document.createElement('div');
+        idSpan.className = 'session-item-id';
+        idSpan.textContent = s.sessionId.substring(0, 8);
+
+        div.addEventListener('dblclick', (e) => {
+          e.stopPropagation();
+          startRename(div, s.sessionId);
+        });
+
+        div.appendChild(preview);
+        div.appendChild(idSpan);
+        div.addEventListener('click', () => switchSession(s.sessionId));
+        sessionList.appendChild(div);
       });
-
-      div.appendChild(preview);
-      div.appendChild(idSpan);
-      div.addEventListener('click', () => switchSession(s.sessionId));
-      sessionList.appendChild(div);
-    });
+    }
   } catch (e) {
     console.error('Failed to load sessions', e);
     sessionList.innerHTML = '<div style="padding:8px 12px;color:var(--red-text);font-size:12px;">加载失败</div>';
@@ -246,6 +282,11 @@ async function switchSession(sessionId) {
   state.sequenceBuffer = [];
   state.tagDetailsEl = {};
   state.currentTagRow = null;
+  state._metaWrapper = null;
+  state.oldestQuestionIndex = null;
+  state.questions = [];
+  state.questionsTotal = 0;
+  state.questionsHasMore = false;
 
   sessionList.querySelectorAll('.session-item').forEach(el => {
     el.classList.toggle('active', el.dataset.sessionId === sessionId);
@@ -255,11 +296,20 @@ async function switchSession(sessionId) {
   const saved = state.sessionStatus[sessionId];
   setStatus(saved || 'idle');
 
+  const targetId = sessionId;
   addProcessing();
-  await loadSessionHistory(sessionId);
-  removeProcessing();
-  refreshHistory();
-  addMessage('system', `已切换到会话 ${sessionId.substring(0, 8)}...`);
+  loadQuestions(10).then(() => {
+    if (state.sessionId !== targetId) { removeProcessing(); return; }
+    const fromIndex = state.questions.length >= 2
+      ? state.questions[1].index
+      : (state.questions.length === 1 ? state.questions[0].index : 0);
+    messagesEl.innerHTML = '';
+    loadSessionHistory(targetId, fromIndex).then(() => {
+      if (state.sessionId !== targetId) return;
+      removeProcessing();
+      addMessage('system', `已切换到会话 ${targetId.substring(0, 8)}...`);
+    });
+  });
 }
 
 newSessionBtn.addEventListener('click', () => {
@@ -272,23 +322,178 @@ newSessionBtn.addEventListener('click', () => {
   state.sequenceBuffer = [];
   state.tagDetailsEl = {};
   state.currentTagRow = null;
+  state._metaWrapper = null;
+  state.oldestQuestionIndex = null;
+  state.questions = [];
+  state.questionsTotal = 0;
+  state.questionsHasMore = false;
   showEmptyState();
   refreshHistory();
   sessionList.querySelectorAll('.session-item').forEach(el => el.classList.remove('active'));
 });
 
-async function loadSessionHistory(sessionId) {
+async function loadQuestions(limit = 10, before = null) {
   try {
-    const res = await fetch(`/api/sessions/${sessionId}/messages?project=${encodeURIComponent(state.project)}`);
-    const messages = await res.json();
+    let url = `/api/sessions/${state.sessionId}/questions?project=${encodeURIComponent(state.project)}&limit=${limit}`;
+    if (before != null) url += `&before=${before}`;
+
+    const res = await fetch(url);
+    const data = await res.json();
+    const questions = data.questions || [];
+
+    if (before != null) {
+      state.questions = [...state.questions, ...questions];
+    } else {
+      state.questions = questions;
+    }
+    state.questionsTotal = data.total || 0;
+    state.questionsHasMore = data.hasMore || false;
+
+    refreshHistory();
+  } catch (e) {
+    console.error('Failed to load questions', e);
+  }
+}
+
+let _questionsLoading = false;
+
+async function loadMoreQuestions() {
+  if (!state.questionsHasMore || _questionsLoading) return;
+  _questionsLoading = true;
+  try {
+    const oldestQuestion = state.questions[state.questions.length - 1];
+    const before = oldestQuestion ? oldestQuestion.index : null;
+    await loadQuestions(10, before);
+  } finally {
+    _questionsLoading = false;
+  }
+}
+
+function jumpToQuestion(index) {
+  const targetId = (state._jumpSerial = (state._jumpSerial || 0) + 1);
+
+  // Step 1: Expand view to include the target if it's older than current range
+  const oldest = state.oldestQuestionIndex;
+  if (oldest != null && index < oldest) {
+    const url = `/api/sessions/${state.sessionId}/messages?project=${encodeURIComponent(state.project)}&fromIndex=${index}&toIndex=${oldest}`;
+    fetch(url).then(res => res.json()).then(data => {
+      if (state._jumpSerial !== targetId) return;
+      prependMessages(data.messages || data);
+      state.oldestQuestionIndex = index;
+      // Step 2: Smooth scroll to target
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          const target = messagesEl.querySelector(`.msg.user[data-line-index="${index}"]`);
+          if (target) {
+            const targetY = target.getBoundingClientRect().top - messagesEl.getBoundingClientRect().top + messagesEl.scrollTop;
+            smoothScrollTo(messagesEl, Math.max(0, targetY - 60), 500);
+          }
+        });
+      });
+    }).catch(() => {});
+  } else {
+    // Target already in view — just scroll
+    requestAnimationFrame(() => {
+      const target = messagesEl.querySelector(`.msg.user[data-line-index="${index}"]`);
+      if (target) {
+        const targetY = target.getBoundingClientRect().top - messagesEl.getBoundingClientRect().top + messagesEl.scrollTop;
+        smoothScrollTo(messagesEl, Math.max(0, targetY - 60), 500);
+      }
+    });
+  }
+}
+
+function prependMessages(messages) {
+  const prevHeight = messagesEl.scrollHeight;
+  const prevTop = messagesEl.scrollTop;
+  state._loadingHistory = true;
+
+  const fragment = document.createDocumentFragment();
+  for (const msg of messages) {
+    if (!msg.blocks) continue;
+    if (msg.role === 'user') {
+      const hasText = msg.blocks.some(b => b.type === 'text' && b.text);
+      if (hasText) {
+        for (const block of msg.blocks) {
+          if (block.type === 'text' && block.text) {
+            const el = makeMessageElement('user', block.text);
+            if (msg.lineIndex != null) el.setAttribute('data-line-index', msg.lineIndex);
+            fragment.appendChild(el);
+            break;
+          }
+        }
+      }
+    } else if (msg.role === 'assistant') {
+      for (const block of msg.blocks) {
+        // Only text blocks for prepended history (no sequence buffer for old content)
+        if (block.type === 'text') {
+          fragment.appendChild(makeMessageElement('assistant', block.text));
+        }
+      }
+    }
+  }
+
+  const firstChild = messagesEl.firstChild;
+  messagesEl.insertBefore(fragment, firstChild);
+
+  // Maintain scroll position: offset by the added height
+  messagesEl.scrollTop = prevTop + (messagesEl.scrollHeight - prevHeight);
+  state._loadingHistory = false;
+}
+
+function makeMessageElement(type, text) {
+  const div = document.createElement('div');
+  div.className = `msg ${type}`;
+  const bubble = document.createElement('div');
+  bubble.className = 'msg-bubble';
+  if (type === 'assistant') {
+    bubble.innerHTML = renderAssistantHtml(text);
+  } else {
+    bubble.textContent = text;
+  }
+  div.appendChild(bubble);
+  return div;
+}
+
+function smoothScrollTo(el, targetY, duration) {
+  const startY = el.scrollTop;
+  const distance = targetY - startY;
+  if (Math.abs(distance) < 4) return;
+  const startTime = performance.now();
+  const easeInOutCubic = t => t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+  function step(now) {
+    const elapsed = now - startTime;
+    const progress = Math.min(elapsed / duration, 1);
+    el.scrollTop = startY + distance * easeInOutCubic(progress);
+    if (progress < 1) requestAnimationFrame(step);
+  }
+  requestAnimationFrame(step);
+}
+
+async function loadSessionHistory(sessionId, fromIndex = null) {
+  try {
+    let url = `/api/sessions/${sessionId}/messages?project=${encodeURIComponent(state.project)}`;
+    if (fromIndex != null) url += `&fromIndex=${fromIndex}`;
+
+    const res = await fetch(url);
+    const data = await res.json();
+    const messages = data.messages || data;
+
+    state.oldestQuestionIndex = fromIndex;
+    state._loadingHistory = true;
+
     for (const msg of messages) {
       if (!msg.blocks) continue;
       if (msg.role === 'user') {
-        flushSequenceBuffer();
-        for (const block of msg.blocks) {
-          if (block.type === 'text' && block.text) {
-            addMessage('user', block.text);
-            break;
+        const hasText = msg.blocks.some(b => b.type === 'text' && b.text);
+        if (hasText) {
+          flushSequenceBuffer();
+          for (const block of msg.blocks) {
+            if (block.type === 'text' && block.text) {
+              const el = addMessage('user', block.text);
+              if (msg.lineIndex != null) el.setAttribute('data-line-index', msg.lineIndex);
+              break;
+            }
           }
         }
       } else if (msg.role === 'assistant') {
@@ -309,14 +514,18 @@ async function loadSessionHistory(sessionId) {
       }
     }
     flushSequenceBuffer();
+    state._loadingHistory = false;
+
     refreshHistory();
   } catch (e) {
+    state._loadingHistory = false;
     console.error('Failed to load session history', e);
     addMessage('error', '加载历史消息失败');
   }
 }
 
 // ====== WebSocket ======
+
 function connect() {
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const wsUrl = `${protocol}//${location.host}/ws/chat`;
@@ -377,6 +586,7 @@ function sendMessage() {
   state.sequenceBuffer = [];
   state.tagDetailsEl = {};
   state.currentTagRow = null;
+  state._metaWrapper = null;
 
   addProcessing();
 
@@ -394,7 +604,8 @@ function sendMessage() {
 
   const payload = JSON.stringify({
     text: text,
-    sessionId: state.sessionId
+    sessionId: state.sessionId,
+    project: state.project
   });
 
   if (state.ws.readyState === WebSocket.OPEN) {
@@ -517,19 +728,25 @@ function appendSequenceBlock(type, data) {
 }
 
 function renderLiveTagRow() {
-  if (state.currentTagRow) {
-    state.currentTagRow.remove();
-    state.currentTagRow = null;
-    state.tagDetailsEl = {};
+  // Remove old wrapper (row + details container) when rebuilding
+  if (state._metaWrapper) {
+    state._metaWrapper.remove();
+    state._metaWrapper = null;
   }
+  state.currentTagRow = null;
+  state.tagDetailsEl = {};
+
+  // Wrapper keeps the row + detail containers as one flex child in #messages,
+  // preventing orphaned nodes and double gap.
+  const wrapper = document.createElement('div');
+  wrapper.className = 'meta-wrapper';
 
   const row = document.createElement('div');
   row.className = 'inline-tag-row';
   row.id = 'liveTagRow';
 
-  state.tagDetailsEl = {};
   const detailsContainer = document.createElement('div');
-  detailsContainer.style.width = '100%';
+  detailsContainer.className = 'meta-details';
 
   for (let i = 0; i < state.sequenceBuffer.length; i++) {
     const entry = state.sequenceBuffer[i];
@@ -542,6 +759,7 @@ function renderLiveTagRow() {
 
     const tag = document.createElement('span');
     tag.className = 'inline-tag';
+    tag.dataset.tagType = entry.type;
     const tagId = 'liveTag-' + i;
 
     if (entry.type === 'thinking') {
@@ -565,9 +783,11 @@ function renderLiveTagRow() {
     detailsContainer.appendChild(detail);
   }
 
+  wrapper.appendChild(row);
+  wrapper.appendChild(detailsContainer);
   state.currentTagRow = row;
-  insertBeforeProcessing(row);
-  insertBeforeProcessing(detailsContainer);
+  state._metaWrapper = wrapper;
+  insertBeforeProcessing(wrapper);
 }
 
 function updateLiveTagRow() {
@@ -650,6 +870,10 @@ function flushSequenceBuffer() {
     state.currentTagRow.removeAttribute('id');
     state.currentTagRow = null;
   }
+  if (state._metaWrapper) {
+    state._metaWrapper.removeAttribute('id');
+    state._metaWrapper = null;
+  }
   for (const refs of Object.values(state.tagDetailsEl)) {
     refs.detail.removeAttribute('id');
   }
@@ -717,7 +941,9 @@ function insertBeforeProcessing(el) {
   } else {
     messagesEl.appendChild(el);
   }
-  messagesEl.scrollTop = messagesEl.scrollHeight;
+  if (!state._loadingHistory) {
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
 }
 
 function addMessage(type, text) {
@@ -1421,51 +1647,63 @@ todoInput.addEventListener('keydown', (e) => {
 // ====== Question history ======
 function refreshHistory() {
   historyList.innerHTML = '';
-  const userMsgs = messagesEl.querySelectorAll('.msg.user');
-  if (userMsgs.length === 0) {
+
+  if (state.questions.length === 0) {
     historyList.innerHTML = '<div class="history-empty">暂无提问记录</div>';
     return;
   }
-  userMsgs.forEach((msgEl, idx) => {
-    const text = msgEl.textContent.trim();
-    const truncated = text.length > 20 ? text.substring(0, 20) + '...' : text;
+
+  state.questions.forEach((q) => {
+    const truncated = q.preview.length > 20 ? q.preview.substring(0, 20) + '...' : q.preview;
     const item = document.createElement('div');
     item.className = 'history-item';
-    item.title = text;
+    item.title = q.preview;
     item.textContent = truncated;
 
     item.addEventListener('click', () => {
-      msgEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      msgEl.classList.remove('highlight-flash');
-      void msgEl.offsetWidth;
-      msgEl.classList.add('highlight-flash');
-      setTimeout(() => msgEl.classList.remove('highlight-flash'), 2000);
+      historyList.querySelectorAll('.history-item').forEach(el => el.classList.remove('history-active'));
+      item.classList.add('history-active');
+      jumpToQuestion(q.index);
     });
+
+    if (q.index === state.oldestQuestionIndex) {
+      item.classList.add('history-active');
+    }
 
     historyList.appendChild(item);
   });
+
+  if (state.questionsHasMore) {
+    const moreBtn = document.createElement('div');
+    moreBtn.className = 'history-load-more';
+    moreBtn.textContent = `加载更多提问 (已加载 ${state.questions.length} / ${state.questionsTotal})`;
+    moreBtn.addEventListener('click', loadMoreQuestions);
+    historyList.appendChild(moreBtn);
+  }
 }
 
 // ====== Init ======
-loadTodos();
-renderTodos();
 showEmptyState();
 loadProjects().then(() => {
-  refreshSessionList();
-
-  // /web-claude-chat hook: ?session=<uuid> overrides localStorage
   const urlParams = new URLSearchParams(window.location.search);
   const targetSession = urlParams.get('session');
   if (targetSession && validSessionId(targetSession)) {
     state.sessionId = targetSession;
     localStorage.setItem(projectStorageKey('session'), targetSession);
   }
+  refreshSessionList();
 
   if (state.sessionId) {
     updateSessionDisplay();
     addProcessing();
-    loadSessionHistory(state.sessionId).then(() => {
-      removeProcessing();
+    loadQuestions(10).then(() => {
+      const fromIndex = state.questions.length >= 2
+        ? state.questions[1].index
+        : (state.questions.length === 1 ? state.questions[0].index : 0);
+      messagesEl.innerHTML = '';
+      loadSessionHistory(state.sessionId, fromIndex).then(() => {
+        removeProcessing();
+      });
     });
   }
 });

@@ -46,12 +46,60 @@ async function findFreePort() {
 // ---- Helpers ----
 function projectKey(names) { return names.replaceAll(':', '-').replaceAll('\\', '-').replaceAll('/', '-'); }
 
-function decodeProjectPath(encoded) {
+const _pathCache = new Map();
+
+async function resolveProjectPath(encoded) {
   if (!encoded) return encoded;
+  if (_pathCache.has(encoded)) return _pathCache.get(encoded);
+
+  // Check metadata cache on disk
+  const projectDir = join(PROJECTS_DIR, encoded);
+  const meta = await loadSessionMeta(projectDir);
+  if (meta._path) {
+    _pathCache.set(encoded, meta._path);
+    return meta._path;
+  }
+
+  let resolved;
+  if (/^[A-Za-z]--/.test(encoded)) {
+    resolved = await resolveWindowsPath(encoded.charAt(0), encoded.substring(3));
+  } else {
+    resolved = decodeSimple(encoded);
+  }
+  if (!resolved) resolved = decodeSimple(encoded);
+
+  // Cache both in-memory and on disk
+  _pathCache.set(encoded, resolved);
+  meta._path = resolved;
+  try { await saveSessionMeta(projectDir, meta); } catch {}
+  return resolved;
+}
+
+function decodeSimple(encoded) {
   if (/^[A-Za-z]--/.test(encoded)) {
     return encoded.charAt(0) + ':\\' + encoded.substring(3).replaceAll('-', '\\');
   }
   return encoded.replaceAll('-', '\\');
+}
+
+async function resolveWindowsPath(drive, rest) {
+  const parts = rest.split('-');
+  const result = await tryPathSegments(drive + ':\\', parts, 0);
+  return result;
+}
+
+async function tryPathSegments(base, parts, idx) {
+  if (idx >= parts.length) return base;
+  for (let end = parts.length - 1; end >= idx; end--) {
+    const segment = parts.slice(idx, end + 1).join('-');
+    const candidate = base + (base.endsWith('\\') ? '' : '\\') + segment;
+    try {
+      await access(candidate);
+      const result = await tryPathSegments(candidate, parts, end + 1);
+      if (result) return result;
+    } catch {}
+  }
+  return null;
 }
 
 async function parseSessionFile(filePath, sessionId) {
@@ -79,6 +127,65 @@ async function parseSessionFile(filePath, sessionId) {
     if (!firstUserMsg) return null;
     return { sessionId, preview: firstUserMsg.slice(0, 150) + (firstUserMsg.length > 150 ? '...' : ''), size };
   } catch { return null; }
+}
+
+async function handleQuestions(res, sessionId, project, searchParams) {
+  const projectDir = join(PROJECTS_DIR, project || projectKey(process.cwd()));
+  const file = join(projectDir, sessionId + '.jsonl');
+  const limit = Math.max(1, Math.min(parseInt(searchParams.get('limit')) || 10, 100));
+  const beforeParam = searchParams.get('before');
+  const before = beforeParam != null ? parseInt(beforeParam) : -1;
+
+  const questions = [];
+  let lineIndex = 0;
+
+  try {
+    const rl = createInterface({ input: createReadStream(file, 'utf-8'), crlfDelay: Infinity });
+    for await (const line of rl) {
+      try {
+        const node = JSON.parse(line);
+        const msg = node.message;
+        if (msg && msg.role === 'user') {
+          const content = msg.content;
+          let text = '';
+          if (typeof content === 'string') {
+            text = content;
+          } else if (Array.isArray(content)) {
+            for (const b of content) {
+              if (b.text) { text = b.text; break; }
+            }
+          }
+          if (text) {
+            // Skip resume noise and internal system notifications
+            const t = text.trim();
+            if (t === 'Continue from where you left off.' || t === 'No response requested.') { lineIndex++; continue; }
+            if (t.startsWith('<task-notification>') || t.startsWith('<local-command-caveat>')) { lineIndex++; continue; }
+            if (t.startsWith('Base directory for this skill:')) { lineIndex++; continue; }
+            const preview = text.length > 150 ? text.substring(0, 150) + '...' : text;
+            questions.push({ index: lineIndex, preview, text });
+          }
+        }
+      } catch {}
+      lineIndex++;
+    }
+    rl.close();
+  } catch { return jsonResponse(res, { questions: [], total: 0, hasMore: false }); }
+
+  // questions are file-ordered (oldest first). Reverse for newest-first.
+  questions.reverse();
+
+  const total = questions.length;
+
+  // Pagination: return questions before the given index
+  let filtered = questions;
+  if (before >= 0) {
+    filtered = questions.filter(q => q.index < before);
+  }
+
+  const page = filtered.slice(0, limit);
+  const hasMore = filtered.length > limit;
+
+  jsonResponse(res, { questions: page, total, hasMore });
 }
 
 async function loadSessionMeta(projectDir) {
@@ -118,14 +225,14 @@ async function handleProjects(res) {
     for (const e of entries) {
       if (!e.isDirectory()) continue;
       const encoded = e.name;
-      const decoded = decodeProjectPath(encoded);
       let sessionCount = 0;
       try {
         const files = await readdir(join(PROJECTS_DIR, encoded));
         sessionCount = files.filter(f => f.endsWith('.jsonl')).length;
       } catch {}
       if (sessionCount === 0) continue;
-      projects.push({ name: encoded, path: decoded, sessionCount });
+      const path = await resolveProjectPath(encoded);
+      projects.push({ name: encoded, path, sessionCount });
     }
   } catch {}
   projects.sort((a, b) => b.sessionCount - a.sessionCount);
@@ -157,20 +264,32 @@ async function handleSessions(res, project) {
   jsonResponse(res, result);
 }
 
-async function handleSessionMessages(res, sessionId, project) {
+async function handleSessionMessages(res, sessionId, project, searchParams) {
   const projectDir = join(PROJECTS_DIR, project || projectKey(process.cwd()));
   const file = join(projectDir, sessionId + '.jsonl');
+  const fromParam = searchParams.get('fromIndex');
+  const fromIndex = fromParam != null ? Math.max(0, parseInt(fromParam)) : null;
+  const toParam = searchParams.get('toIndex');
+  const toIndex = toParam != null ? parseInt(toParam) : null;
+
   const messages = [];
+  let lineIndex = 0;
+
   try {
     const rl = createInterface({ input: createReadStream(file, 'utf-8'), crlfDelay: Infinity });
     for await (const line of rl) {
+      // Skip lines before fromIndex
+      if (fromIndex != null && lineIndex < fromIndex) { lineIndex++; continue; }
+      // Stop at toIndex (exclusive)
+      if (toIndex != null && lineIndex >= toIndex) break;
+
       try {
         const node = JSON.parse(line);
         const msg = node.message;
-        if (!msg) continue;
+        if (!msg) { lineIndex++; continue; }
         const role = msg.role || '';
         const content = msg.content;
-        if (!content) continue;
+        if (!content) { lineIndex++; continue; }
         const blocks = [];
         if (Array.isArray(content)) {
           for (const b of content) {
@@ -184,19 +303,23 @@ async function handleSessionMessages(res, sessionId, project) {
         } else if (typeof content === 'string') {
           blocks.push({ type: 'text', text: content });
         }
-        if (blocks.length === 0) continue;
-        // skip resume noise
+        if (blocks.length === 0) { lineIndex++; continue; }
+        // skip resume noise and internal system notifications
         const firstBlock = blocks[0];
         if (firstBlock.type === 'text') {
-          const t = firstBlock.text || '';
-          if (t === 'Continue from where you left off.' || t === 'No response requested.') continue;
+          const t = (firstBlock.text || '').trim();
+          if (t === 'Continue from where you left off.' || t === 'No response requested.') { lineIndex++; continue; }
+          if (t.startsWith('<task-notification>') || t.startsWith('<local-command-caveat>')) { lineIndex++; continue; }
+          if (t.startsWith('Base directory for this skill:')) { lineIndex++; continue; }
         }
-        messages.push({ role, blocks });
+        messages.push({ role, blocks, lineIndex });
       } catch {}
+      lineIndex++;
     }
     rl.close();
-  } catch { return jsonResponse(res, []); }
-  jsonResponse(res, messages);
+  } catch { return jsonResponse(res, { messages: [], total: 0 }); }
+
+  jsonResponse(res, { messages, total: messages.length });
 }
 
 async function handleSessionNames(res, project, method, sessionId, body) {
@@ -228,9 +351,13 @@ async function handleRequest(req, res) {
     const idx = parts.indexOf('sessions');
     if (parts[idx + 1] === 'names') return handleSessionNames(res, url.searchParams.get('project') || '', method);
     if (parts[idx + 1] === 'messages') return res.writeHead(400) && res.end();
+    if (path.endsWith('/questions')) {
+      const sessionId = parts[idx + 1];
+      return handleQuestions(res, sessionId, url.searchParams.get('project') || '', url.searchParams);
+    }
     if (path.endsWith('/messages')) {
       const sessionId = parts[idx + 1];
-      return handleSessionMessages(res, sessionId, url.searchParams.get('project') || '');
+      return handleSessionMessages(res, sessionId, url.searchParams.get('project') || '', url.searchParams);
     }
     if (path.endsWith('/name') || path.endsWith('/names')) {
       const sessionId = parts[idx + 1];
@@ -268,16 +395,22 @@ function setupWebSocket(server) {
     const wsId = randomUUID();
     console.log('WebSocket connected:', wsId);
 
-    ws.on('message', (raw) => {
+    ws.on('message', async (raw) => {
       let data;
       try { data = JSON.parse(raw.toString()); } catch { return; }
-      const { text, sessionId } = data;
+      const { text, sessionId, project } = data;
       if (!text) return;
+
+      // Resolve project path for correct CWD when spawning Claude
+      let cwd = process.cwd();
+      if (project) {
+        try { cwd = await resolveProjectPath(project); } catch {}
+      }
 
       const args = ['-p', '--output-format', 'stream-json', '--input-format', 'stream-json', '--verbose'];
       if (sessionId) { args.push('--resume', sessionId); }
 
-      const proc = spawn('claude', args, { cwd: process.cwd(), env: { ...process.env }, stdio: ['pipe', 'pipe', 'pipe'] });
+      const proc = spawn('claude', args, { cwd, env: { ...process.env }, stdio: ['pipe', 'pipe', 'pipe'] });
 
       // Build user message JSON
       const userMsg = JSON.stringify({ type: 'user', message: { role: 'user', content: text } });
