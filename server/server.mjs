@@ -443,6 +443,11 @@ function setupWebSocket(server) {
       const { text, sessionId, project } = data;
       if (!text) return;
 
+      if (project && !validatePathParam('project', project)) {
+        if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'error', message: 'Invalid project parameter' }));
+        return;
+      }
+
       // Resolve project path for correct CWD when spawning Claude
       let cwd = process.cwd();
       if (project) {
