@@ -25,7 +25,8 @@ const state = {
   questions: [],                // loaded questions for right panel {index, preview, text}
   questionsTotal: 0,
   questionsHasMore: false,
-  _metaWrapper: null
+  _metaWrapper: null,
+  pendingSession: false
 };
 
 // Tool icons map
@@ -51,20 +52,79 @@ const statusBar = document.getElementById('statusBar');
 const cmdDropdown = document.getElementById('cmdDropdown');
 const historyList = document.getElementById('historyList');
 
-const SLASH_COMMANDS = [
-  { cmd: '/superpowers:brainstorming', desc: '头脑风暴，将想法转化为设计文档' },
-  { cmd: '/superpowers:writing-plans', desc: '编写详细实施计划' },
-  { cmd: '/superpowers:subagent-driven-development', desc: '子代理驱动开发执行计划' },
-  { cmd: '/superpowers:executing-plans', desc: '批量执行开发计划' },
-  { cmd: '/superpowers:finishing-a-development-branch', desc: '完成开发分支收尾' },
-  { cmd: '/superpowers:requesting-code-review', desc: '请求代码审查' },
-  { cmd: '/superpowers:test-driven-development', desc: '测试驱动开发' },
-  { cmd: '/superpowers:using-git-worktrees', desc: '使用 Git Worktree 隔离工作区' },
-  { cmd: '/superpowers:using-superpowers', desc: 'Superpowers 使用指南' },
-];
+let SLASH_COMMANDS = [];
+
+async function loadCommands() {
+  try {
+    const resp = await fetch('/api/commands');
+    if (resp.ok) {
+      SLASH_COMMANDS = await resp.json();
+    }
+  } catch {
+    console.error('Failed to load slash commands');
+  }
+}
+
+// Call on init
+loadCommands();
+
+// Initialize mermaid (loaded via CDN)
+if (typeof mermaid !== 'undefined') {
+  mermaid.initialize({
+    startOnLoad: false,
+    theme: 'neutral',
+    securityLevel: 'antiscript',
+    fontFamily: 'inherit'
+  });
+}
+
+// Parse <command-message> XML tags from user message text
+// Returns { name, args } or null if not a command message
+function parseCommandMessage(text) {
+  const match = text.match(/<command-message>\s*<command-name>([\s\S]*?)<\/command-name>\s*<command-args>([\s\S]*?)<\/command-args>\s*<\/command-message>/);
+  if (!match) return null;
+  return { name: match[1].trim(), args: match[2].trim() };
+}
+
+function getCommandGroup(name) {
+  if (name.startsWith('devflow:')) return 'devflow';
+  if (name.startsWith('superpowers:')) return 'superpowers';
+  return 'default';
+}
+
+function renderCommandCard(name, args, group) {
+  const card = document.createElement('div');
+  card.className = `command-card ${group}`;
+
+  const label = document.createElement('span');
+  label.className = 'cmd-label';
+  label.textContent = '/' + name;
+
+  const body = document.createElement('span');
+  body.className = 'cmd-args';
+  body.textContent = args;
+
+  card.appendChild(label);
+  card.appendChild(body);
+  return card;
+}
+
+const GROUP_PRIORITY = { 'devflow': 0, 'superpowers': 1 };
 
 function cmdDropdownVisible() {
   return !cmdDropdown.classList.contains('hidden');
+}
+
+function autoResizeTextarea() {
+  const style = getComputedStyle(userInput);
+  const lineH = parseFloat(style.lineHeight);
+  const padTop = parseFloat(style.paddingTop);
+  const padBottom = parseFloat(style.paddingBottom);
+  const maxH = lineH * 10 + padTop + padBottom;
+  userInput.style.height = 'auto';
+  const newH = Math.min(userInput.scrollHeight, maxH);
+  userInput.style.height = newH + 'px';
+  userInput.style.overflowY = userInput.scrollHeight > maxH ? 'auto' : 'hidden';
 }
 
 function validSessionId(id) {
@@ -163,8 +223,32 @@ async function refreshSessionList() {
     const res = await fetch(`/api/sessions?project=${encodeURIComponent(state.project)}`);
     const sessions = await res.json();
     sessionList.innerHTML = '';
+
+    // Render pending session placeholder at top
+    if (state.pendingSession) {
+      const pendingDiv = document.createElement('div');
+      pendingDiv.className = 'session-item pending' + (state.sessionId ? '' : ' active');
+      pendingDiv.dataset.pending = 'true';
+
+      const preview = document.createElement('div');
+      preview.className = 'session-item-preview';
+      preview.textContent = '新会话';
+
+      pendingDiv.appendChild(preview);
+      pendingDiv.addEventListener('click', () => {
+        sessionList.querySelectorAll('.session-item').forEach(el => el.classList.remove('active'));
+        pendingDiv.classList.add('active');
+        state.sessionId = null;
+        localStorage.removeItem(projectStorageKey('session'));
+        clearChatUI();
+      });
+      sessionList.appendChild(pendingDiv);
+    }
+
     if (sessions.length === 0) {
-      sessionList.innerHTML = '<div style="padding:8px 12px;color:var(--text-muted);font-size:12px;">暂无会话</div>';
+      if (!state.pendingSession) {
+        sessionList.innerHTML = '<div style="padding:8px 12px;color:var(--text-muted);font-size:12px;">暂无会话</div>';
+      }
       return;
     }
 
@@ -312,10 +396,7 @@ async function switchSession(sessionId) {
   });
 }
 
-newSessionBtn.addEventListener('click', () => {
-  state.sessionId = null;
-  localStorage.removeItem(projectStorageKey('session'));
-  updateSessionDisplay();
+function clearChatUI() {
   messagesEl.innerHTML = '';
   state.processing = false;
   sendBtn.disabled = false;
@@ -329,7 +410,24 @@ newSessionBtn.addEventListener('click', () => {
   state.questionsHasMore = false;
   showEmptyState();
   refreshHistory();
-  sessionList.querySelectorAll('.session-item').forEach(el => el.classList.remove('active'));
+  updateSessionDisplay();
+}
+
+newSessionBtn.addEventListener('click', () => {
+  if (state.pendingSession) {
+    state.sessionId = null;
+    localStorage.removeItem(projectStorageKey('session'));
+    clearChatUI();
+    sessionList.querySelectorAll('.session-item').forEach(el => el.classList.remove('active'));
+    const pendingEl = sessionList.querySelector('.session-item.pending');
+    if (pendingEl) pendingEl.classList.add('active');
+    return;
+  }
+  state.pendingSession = true;
+  state.sessionId = null;
+  localStorage.removeItem(projectStorageKey('session'));
+  clearChatUI();
+  refreshSessionList();
 });
 
 async function loadQuestions(limit = 10, before = null) {
@@ -448,8 +546,14 @@ function makeMessageElement(type, text) {
   bubble.className = 'msg-bubble';
   if (type === 'assistant') {
     bubble.innerHTML = renderAssistantHtml(text);
+    renderMermaidBlocks(bubble);
   } else {
-    bubble.textContent = text;
+    const cmd = parseCommandMessage(text);
+    if (cmd) {
+      bubble.appendChild(renderCommandCard(cmd.name, cmd.args, getCommandGroup(cmd.name)));
+    } else {
+      bubble.textContent = text;
+    }
   }
   div.appendChild(bubble);
   return div;
@@ -516,6 +620,10 @@ async function loadSessionHistory(sessionId, fromIndex = null) {
     flushSequenceBuffer();
     state._loadingHistory = false;
 
+    if (messages.length > 0) {
+      setStatus('done');
+    }
+
     refreshHistory();
   } catch (e) {
     state._loadingHistory = false;
@@ -532,10 +640,10 @@ function connect() {
   state.ws = new WebSocket(wsUrl);
 
   state.ws.onopen = () => {
-    console.log('WebSocket connected');
     const saved = state.sessionId ? state.sessionStatus[state.sessionId] : null;
     setStatus(saved || 'idle');
     updateSessionDisplay();
+    if (state.sessionId) loadQuestions();
   };
 
   state.ws.onmessage = (event) => {
@@ -548,7 +656,6 @@ function connect() {
   };
 
   state.ws.onclose = () => {
-    console.log('WebSocket disconnected, reconnecting in 2s...');
     setTimeout(connect, 2000);
   };
 
@@ -580,6 +687,7 @@ function sendMessage() {
 
   addMessage('user', text);
   userInput.value = '';
+  autoResizeTextarea();
   state.processing = true;
   sendBtn.disabled = true;
   setStatus('processing');
@@ -629,17 +737,20 @@ function handleEvent(event) {
   }
 
   const type = event.type;
-  console.log('CC event:', type, event.subtype || '');
 
   try {
     switch (type) {
       case 'system':
         if (event.session_id) {
           if (!state.sessionId) {
+            if (state.pendingSession) {
+              state.pendingSession = false;
+            }
             state.sessionId = event.session_id;
             localStorage.setItem(projectStorageKey('session'), event.sessionId);
             updateSessionDisplay();
             refreshSessionList();
+            loadQuestions();
           }
         }
         break;
@@ -946,6 +1057,11 @@ function insertBeforeProcessing(el) {
   }
 }
 
+function formatTimestamp(date) {
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
 function addMessage(type, text) {
   const empty = messagesEl.querySelector('.empty-state');
   if (empty) empty.remove();
@@ -956,10 +1072,23 @@ function addMessage(type, text) {
   const bubble = document.createElement('div');
   bubble.className = 'msg-bubble';
 
+  const ts = document.createElement('div');
+  ts.className = 'msg-ts';
+  ts.textContent = formatTimestamp(new Date());
+  bubble.appendChild(ts);
+
   if (type === 'assistant') {
-    bubble.innerHTML = renderAssistantHtml(text);
+    bubble.insertAdjacentHTML('beforeend', renderAssistantHtml(text));
+    renderMermaidBlocks(bubble);
+  } else if (type === 'user') {
+    const cmd = parseCommandMessage(text);
+    if (cmd) {
+      bubble.appendChild(renderCommandCard(cmd.name, cmd.args, getCommandGroup(cmd.name)));
+    } else {
+      bubble.appendChild(document.createTextNode(text));
+    }
   } else {
-    bubble.textContent = text;
+    bubble.appendChild(document.createTextNode(text));
   }
   div.appendChild(bubble);
 
@@ -1079,186 +1208,7 @@ function parseSegments(text) {
   });
 }
 
-function splitDecisions(text) {
-  // Detect decision paragraphs: lines starting with decision indicators
-  const decisionPatterns = [
-    /^(I'll|I will|Let me|Let's)\s/,
-    /^(The best|The right|The correct)\s/,
-    /^(I recommend|I suggest|I propose)\s/,
-    /^(The plan is|The approach is|We'll use)\s/,
-    /^(I've decided|My decision|We should)\s/,
-  ];
-
-  const segments = [];
-  const lines = text.split('\n');
-  let currentText = '';
-  let currentDecision = '';
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    // Check if this line starts a decision
-    let isDecision = false;
-    for (const pat of decisionPatterns) {
-      if (pat.test(line.trim())) {
-        isDecision = true;
-        break;
-      }
-    }
-
-    if (isDecision && currentDecision === '') {
-      // Start of a decision paragraph
-      if (currentText) {
-        segments.push({ type: 'text', content: currentText });
-        currentText = '';
-      }
-      currentDecision = line;
-    } else if (isDecision && currentDecision) {
-      currentDecision += '\n' + line;
-    } else if (!isDecision && currentDecision) {
-      // Continue decision paragraph if it's not an empty line
-      if (line.trim() === '') {
-        segments.push({ type: 'decision', content: currentDecision });
-        currentDecision = '';
-        currentText += '\n' + line;
-      } else if (currentDecision.split('\n').length <= 3) {
-        currentDecision += '\n' + line;
-      } else {
-        segments.push({ type: 'decision', content: currentDecision });
-        currentDecision = '';
-        currentText += line + '\n';
-      }
-    } else {
-      currentText += (currentText ? '\n' : '') + line;
-    }
-  }
-
-  if (currentDecision) {
-    segments.push({ type: 'decision', content: currentDecision });
-  }
-  if (currentText) {
-    segments.push({ type: 'text', content: currentText });
-  }
-
-  return segments;
-}
-
-function parseContentBlocks(text) {
-  const segments = [];
-  const lines = text.split('\n');
-  let i = 0;
-  let buf = [];
-
-  const flushText = () => {
-    if (buf.length > 0) {
-      segments.push({ type: 'text', content: buf.join('\n') });
-      buf = [];
-    }
-  };
-
-  while (i < lines.length) {
-    const line = lines[i];
-
-    // Table: starts with | and next non-empty line is |---|---|
-    if (/^\|.*\|$/.test(line.trim())) {
-      const nextNonEmpty = findNextNonEmpty(lines, i + 1);
-      if (nextNonEmpty !== -1 && /^\|[\s\-:|]+\|$/.test(lines[nextNonEmpty].trim())) {
-        flushText();
-        const tableLines = [line];
-        i++;
-        while (i < lines.length) {
-          if (i === nextNonEmpty) {
-            tableLines.push(lines[i]);
-          } else if (/^\|.*\|$/.test(lines[i].trim())) {
-            tableLines.push(lines[i]);
-          } else if (lines[i].trim() === '') {
-            break;
-          }
-          i++;
-        }
-        segments.push(...parseTable(tableLines));
-        continue;
-      }
-    }
-
-    // Unordered list: - or * followed by space
-    if (/^[\-\*]\s/.test(line)) {
-      flushText();
-      const items = [];
-      while (i < lines.length && /^[\-\*]\s/.test(lines[i])) {
-        items.push(lines[i].replace(/^[\-\*]\s+/, ''));
-        i++;
-      }
-      segments.push({ type: 'ulist', items: items });
-      continue;
-    }
-
-    // Ordered list: number followed by dot and space
-    if (/^\d+\.\s/.test(line)) {
-      flushText();
-      const items = [];
-      while (i < lines.length && /^\d+\.\s/.test(lines[i])) {
-        items.push(lines[i].replace(/^\d+\.\s+/, ''));
-        i++;
-      }
-      segments.push({ type: 'olist', items: items });
-      continue;
-    }
-
-    // Blockquote: >
-    if (line.startsWith('>')) {
-      flushText();
-      const quoteLines = [];
-      while (i < lines.length && lines[i].startsWith('>')) {
-        quoteLines.push(lines[i].replace(/^>\s?/, ''));
-        i++;
-      }
-      segments.push({ type: 'blockquote', content: quoteLines.join('\n') });
-      continue;
-    }
-
-    // Heading: ## or ###
-    const headingMatch = line.match(/^(#{2,4})\s+(.+)/);
-    if (headingMatch) {
-      flushText();
-      segments.push({ type: 'heading', level: headingMatch[1].length, content: headingMatch[2] });
-      i++;
-      continue;
-    }
-
-    buf.push(line);
-    i++;
-  }
-
-  flushText();
-  return segments;
-}
-
-function findNextNonEmpty(lines, start) {
-  for (let i = start; i < lines.length; i++) {
-    if (lines[i].trim() !== '') return i;
-  }
-  return -1;
-}
-
-function parseTable(lines) {
-  if (lines.length < 2) return [{ type: 'text', content: lines.join('\n') }];
-
-  const parseRow = (row) => {
-    return row.replace(/^\||\|$/g, '').split('|').map(c => c.trim());
-  };
-
-  const header = parseRow(lines[0]);
-  const rows = [];
-  for (let i = 2; i < lines.length; i++) {
-    if (/^\|.*\|$/.test(lines[i].trim())) {
-      rows.push(parseRow(lines[i]));
-    } else {
-      const remaining = lines.slice(i).join('\n');
-      return [{ type: 'table', header: header, rows: rows }, { type: 'text', content: remaining }];
-    }
-  }
-  return [{ type: 'table', header: header, rows: rows }];
-}
+// splitDecisions, parseContentBlocks, findNextNonEmpty, parseTable — moved to js/parser-utils.js
 
 function renderTable(seg) {
   let html = '<div class="md-table-wrap"><table class="md-table">';
@@ -1279,6 +1229,10 @@ function renderTable(seg) {
 }
 
 function renderCodeBlock(lang, code) {
+  if (lang === 'mermaid') {
+    const id = 'mmd-' + Math.random().toString(36).substring(2, 8);
+    return `<div class="mermaid-block" id="${id}"><div class="code-header"><span class="code-lang">mermaid</span></div><div class="mermaid-placeholder" data-id="${id}">${escapeHtml(code)}</div></div>`;
+  }
   const id = 'code-' + Math.random().toString(36).substring(2, 8);
   const lines = code.split('\n');
   const lineCount = lines.length;
@@ -1298,6 +1252,29 @@ function renderCodeBlock(lang, code) {
   }
   html += '</div>';
   return html;
+}
+
+async function renderMermaidBlocks(container) {
+  if (typeof mermaid === 'undefined') return;
+  const placeholders = container.querySelectorAll('.mermaid-placeholder');
+  for (const ph of placeholders) {
+    const blockId = ph.dataset.id;
+    const code = ph.textContent;
+    try {
+      const { svg } = await mermaid.render('mmd-svg-' + blockId, code);
+      const wrapper = document.getElementById(blockId);
+      if (wrapper) {
+        wrapper.classList.add('mermaid-rendered');
+        wrapper.innerHTML = '<div class="mermaid-svg">' + svg + '</div>';
+      }
+    } catch (e) {
+      const wrapper = document.getElementById(blockId);
+      if (wrapper) {
+        wrapper.innerHTML = '<div class="code-header"><span class="code-lang">mermaid</span><span style="color:#e53e3e;font-size:11px">渲染失败</span></div><pre class="code-body"><code>' + escapeHtml(code) + '</code></pre>';
+        wrapper.classList.add('code-block');
+      }
+    }
+  }
 }
 
 // Expose copyCode globally for inline onclick handler
@@ -1356,35 +1333,12 @@ function renderDiffBlock(diffText) {
   </div>`;
 }
 
-// Simple inline markdown (no block-level parsing)
-function simpleMarkdownInline(text) {
-  return text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-    .replace(/\*(.+?)\*/g, '<em>$1</em>')
-    .replace(/~~(.+?)~~/g, '<del>$1</del>')
-    .replace(/`([^`]+)`/g, '<code style="background:var(--accent-light);padding:1px 5px;border-radius:3px;font-size:13px;">$1</code>')
-    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
-    .replace(/\n/g, '<br>');
-}
+// ====== Parsing/utility functions (moved to js/parser-utils.js) ======
+// splitDecisions, parseContentBlocks, findNextNonEmpty, parseTable,
+// simpleMarkdownInline, generateThinkingSummary, escapeHtml
+// are now defined in parser-utils.js (loaded before this script)
 
-function generateThinkingSummary(text) {
-  if (!text) return '(思考中)';
-  // Take first meaningful sentence, max ~80 chars
-  const cleaned = text.replace(/^[\s\n]+/, '');
-  const firstLine = cleaned.split('\n')[0];
-  if (firstLine.length <= 80) return firstLine || '(思考中)';
-  // Truncate at last complete word under 80 chars
-  const truncated = firstLine.substring(0, 80);
-  const lastSpace = truncated.lastIndexOf(' ');
-  return (lastSpace > 40 ? truncated.substring(0, lastSpace) : truncated) + '...';
-}
-
-function escapeHtml(text) {
-  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-}
+// Simple inline markdown (no block-level parsing) — moved to parser-utils.js
 
 function renderCompletionBar(numTurns, durationMs) {
   const bar = document.createElement('div');
@@ -1433,6 +1387,7 @@ function moveSelection(delta) {
 }
 
 userInput.addEventListener('input', () => {
+  autoResizeTextarea();
   const text = userInput.value;
   const cursorPos = userInput.selectionStart;
   const beforeCursor = text.substring(0, cursorPos);
@@ -1444,7 +1399,8 @@ userInput.addEventListener('input', () => {
   }
 
   const query = slashMatch[1].toLowerCase();
-  const matches = SLASH_COMMANDS.filter(c => c.cmd.toLowerCase().includes(query));
+  let matches = SLASH_COMMANDS.filter(c => c.cmd.toLowerCase().includes(query));
+  matches.sort((a, b) => (GROUP_PRIORITY[a.group] ?? 99) - (GROUP_PRIORITY[b.group] ?? 99));
 
   if (matches.length === 0) {
     cmdDropdown.classList.add('hidden');

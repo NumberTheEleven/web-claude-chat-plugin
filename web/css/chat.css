@@ -165,6 +165,21 @@ body {
 }
 .session-item:hover { background: var(--accent-light); }
 .session-item.active { background: var(--accent-light); color: var(--accent-text); font-weight: 600; border-left: 3px solid var(--accent); padding-left: 9px; }
+.session-item.pending {
+  color: var(--text-muted);
+  font-style: italic;
+  border: 1px dashed var(--border);
+  background: transparent;
+}
+.session-item.pending:hover { background: var(--accent-light); color: var(--text-secondary); }
+.session-item.pending.active {
+  border: 1px dashed var(--accent);
+  color: var(--accent-text);
+  font-weight: 500;
+  font-style: italic;
+  background: var(--accent-light);
+  padding-left: 12px;
+}
 
 .session-item-id {
   font-size: 10px;
@@ -307,6 +322,14 @@ body {
   line-height: 1.65;
   white-space: pre-wrap;
   word-break: break-word;
+}
+.msg-ts {
+  font-size: 10px;
+  color: var(--text-muted);
+  text-align: right;
+  font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace;
+  margin-bottom: 4px;
+  user-select: none;
 }
 .msg.user .msg-bubble {
   background: var(--accent-light);
@@ -1156,4 +1179,31 @@ h6.md-heading { font-size: 12px; }
 }
 .msg.user.highlight-flash {
   animation: highlightFlash 2s ease-out;
+}
+
+/* ====== Mermaid Diagram ====== */
+.mermaid-block {
+  margin: 8px 0;
+  border: 1px solid var(--border);
+  border-left: 3px solid #7c3aed;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+.mermaid-block .mermaid-placeholder { display: none; }
+.mermaid-loading {
+  padding: 20px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.mermaid-svg {
+  background: #fff;
+  padding: 12px;
+  overflow-x: auto;
+}
+.mermaid-svg svg { max-width: 100%; }
+.mermaid-error {
+  padding: 4px 12px;
+  font-size: 11px;
+  color: #e53e3e;
 }

@@ -1,13 +1,19 @@
 import { createServer } from 'http';
 import { readFile, readdir, stat, access, mkdir, writeFile } from 'fs/promises';
 import { createReadStream } from 'fs';
-import { join, extname } from 'path';
+import { join, extname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { spawn } from 'child_process';
 import { lookup } from 'dns/promises';
 import { createInterface } from 'readline';
 import { randomUUID } from 'crypto';
-import { WebSocketServer } from 'ws';
+import { WebSocketServer, WebSocket } from 'ws';
+
+function validatePathParam(name, value) {
+  if (value == null) return true;
+  if (value.includes('..') || value.includes('/') || value.includes('\\')) return false;
+  return true;
+}
 
 // ---- Config ----
 const PORT_RANGE_START = 50000;
@@ -71,7 +77,7 @@ async function resolveProjectPath(encoded) {
   // Cache both in-memory and on disk
   _pathCache.set(encoded, resolved);
   meta._path = resolved;
-  try { await saveSessionMeta(projectDir, meta); } catch {}
+  try { await saveSessionMeta(projectDir, meta); } catch (e) { console.error('Failed to persist session meta cache:', e.message); }
   return resolved;
 }
 
@@ -130,6 +136,8 @@ async function parseSessionFile(filePath, sessionId) {
 }
 
 async function handleQuestions(res, sessionId, project, searchParams) {
+  if (!validatePathParam('project', project)) return jsonResponse(res, { error: 'Invalid parameter' }, 400);
+  if (!validatePathParam('sessionId', sessionId)) return jsonResponse(res, { error: 'Invalid parameter' }, 400);
   const projectDir = join(PROJECTS_DIR, project || projectKey(process.cwd()));
   const file = join(projectDir, sessionId + '.jsonl');
   const limit = Math.max(1, Math.min(parseInt(searchParams.get('limit')) || 10, 100));
@@ -229,17 +237,18 @@ async function handleProjects(res) {
       try {
         const files = await readdir(join(PROJECTS_DIR, encoded));
         sessionCount = files.filter(f => f.endsWith('.jsonl')).length;
-      } catch {}
+      } catch (e) { console.error('Failed to read project dir:', encoded, e.message); }
       if (sessionCount === 0) continue;
       const path = await resolveProjectPath(encoded);
       projects.push({ name: encoded, path, sessionCount });
     }
-  } catch {}
+  } catch (e) { console.error('Failed to list projects:', e.message); }
   projects.sort((a, b) => b.sessionCount - a.sessionCount);
   jsonResponse(res, projects);
 }
 
 async function handleSessions(res, project) {
+  if (!validatePathParam('project', project)) return jsonResponse(res, { error: 'Invalid parameter' }, 400);
   const projectDir = join(PROJECTS_DIR, project || projectKey(process.cwd()));
   const sessions = [];
   try {
@@ -254,7 +263,7 @@ async function handleSessions(res, project) {
         sessions.push(info);
       }
     }
-  } catch { return jsonResponse(res, sessions); }
+  } catch (e) { console.error('Failed to read session dir:', projectDir, e.message); return jsonResponse(res, sessions); }
   sessions.sort((a, b) => b.lastModified - a.lastModified);
   const result = sessions.slice(0, 50);
   const meta = await loadSessionMeta(projectDir);
@@ -265,6 +274,8 @@ async function handleSessions(res, project) {
 }
 
 async function handleSessionMessages(res, sessionId, project, searchParams) {
+  if (!validatePathParam('project', project)) return jsonResponse(res, { error: 'Invalid parameter' }, 400);
+  if (!validatePathParam('sessionId', sessionId)) return jsonResponse(res, { error: 'Invalid parameter' }, 400);
   const projectDir = join(PROJECTS_DIR, project || projectKey(process.cwd()));
   const file = join(projectDir, sessionId + '.jsonl');
   const fromParam = searchParams.get('fromIndex');
@@ -313,16 +324,18 @@ async function handleSessionMessages(res, sessionId, project, searchParams) {
           if (t.startsWith('Base directory for this skill:')) { lineIndex++; continue; }
         }
         messages.push({ role, blocks, lineIndex });
-      } catch {}
+      } catch (e) { console.error('Malformed JSON line in session file:', file, 'line', lineIndex, e.message); }
       lineIndex++;
     }
     rl.close();
-  } catch { return jsonResponse(res, { messages: [], total: 0 }); }
+  } catch (e) { console.error('Failed to read session file:', file, e.message); return jsonResponse(res, { messages: [], total: 0 }); }
 
   jsonResponse(res, { messages, total: messages.length });
 }
 
 async function handleSessionNames(res, project, method, sessionId, body) {
+  if (!validatePathParam('project', project)) return jsonResponse(res, { error: 'Invalid parameter' }, 400);
+  if (!validatePathParam('sessionId', sessionId)) return jsonResponse(res, { error: 'Invalid parameter' }, 400);
   const projectDir = join(PROJECTS_DIR, project || projectKey(process.cwd()));
   let meta = await loadSessionMeta(projectDir);
   if (method === 'PUT' && sessionId) {
@@ -339,12 +352,37 @@ async function handleSessionNames(res, project, method, sessionId, body) {
 
 // ---- Route Dispatch ----
 async function handleRequest(req, res) {
-  const url = new URL(req.url, 'http://localhost');
+  let url;
+  try { url = new URL(req.url, 'http://localhost'); } catch {
+    res.writeHead(400);
+    res.end('Bad Request: malformed URL');
+    return;
+  }
   const path = url.pathname;
   const method = req.method;
 
   // API routes
   if (path === '/api/projects') return handleProjects(res);
+  if (path === '/api/commands') {
+    const commands = [
+      { cmd: '/devflow:clarify', group: 'devflow', desc: '需求澄清，将模糊想法转化为清晰需求' },
+      { cmd: '/devflow:breakdown', group: 'devflow', desc: '需求拆解，转化为可跟踪的编号清单' },
+      { cmd: '/devflow:blueprint', group: 'devflow', desc: '方案蓝图，从需求清单生成技术方案' },
+      { cmd: '/devflow:discover', group: 'devflow', desc: '项目扫描，发现优化机会和改善方向' },
+      { cmd: '/devflow:implement', group: 'devflow', desc: '执行实施，按蓝图编写代码' },
+      { cmd: '/devflow:verify', group: 'devflow', desc: '验证收尾，检查代码质量和部署就绪' },
+      { cmd: '/superpowers:brainstorming', group: 'superpowers', desc: '头脑风暴，将想法转化为设计文档' },
+      { cmd: '/superpowers:writing-plans', group: 'superpowers', desc: '编写详细实施计划' },
+      { cmd: '/superpowers:subagent-driven-development', group: 'superpowers', desc: '子代理驱动开发执行计划' },
+      { cmd: '/superpowers:executing-plans', group: 'superpowers', desc: '批量执行开发计划' },
+      { cmd: '/superpowers:finishing-a-development-branch', group: 'superpowers', desc: '完成开发分支收尾' },
+      { cmd: '/superpowers:requesting-code-review', group: 'superpowers', desc: '请求代码审查' },
+      { cmd: '/superpowers:test-driven-development', group: 'superpowers', desc: '测试驱动开发' },
+      { cmd: '/superpowers:using-git-worktrees', group: 'superpowers', desc: '使用 Git Worktree 隔离工作区' },
+      { cmd: '/superpowers:using-superpowers', group: 'superpowers', desc: 'Superpowers 使用指南' },
+    ];
+    return jsonResponse(res, commands);
+  }
   if (path === '/api/sessions') return handleSessions(res, url.searchParams.get('project') || '');
   if (path.startsWith('/api/sessions/')) {
     const parts = path.split('/');
@@ -365,7 +403,12 @@ async function handleRequest(req, res) {
         const chunks = [];
         req.on('data', c => chunks.push(c));
         return req.on('end', async () => {
-          const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : {};
+          let body;
+          try {
+            body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : {};
+          } catch {
+            return jsonResponse(res, { error: 'Invalid JSON' }, 400);
+          }
           return handleSessionNames(res, url.searchParams.get('project') || '', method, sessionId, body);
         });
       }
@@ -393,8 +436,7 @@ function setupWebSocket(server) {
 
   wss.on('connection', (ws) => {
     const wsId = randomUUID();
-    console.log('WebSocket connected:', wsId);
-
+    
     ws.on('message', async (raw) => {
       let data;
       try { data = JSON.parse(raw.toString()); } catch { return; }
@@ -404,7 +446,7 @@ function setupWebSocket(server) {
       // Resolve project path for correct CWD when spawning Claude
       let cwd = process.cwd();
       if (project) {
-        try { cwd = await resolveProjectPath(project); } catch {}
+        try { cwd = await resolveProjectPath(project); } catch (e) { console.error('Failed to resolve project path for WebSocket:', project, e.message); }
       }
 
       const args = ['-p', '--output-format', 'stream-json', '--input-format', 'stream-json', '--verbose'];
@@ -424,23 +466,26 @@ function setupWebSocket(server) {
         try {
           const evt = JSON.parse(line);
           if (!evt._sessionId) evt._sessionId = sessionId;
-          ws.send(JSON.stringify(evt));
-        } catch { ws.send(line); }
+          if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(evt));
+        } catch { if (ws.readyState === WebSocket.OPEN) ws.send(line); }
       });
-      rl.on('close', () => ws.send(JSON.stringify({ type: 'done', _sessionId: sessionId })));
+      rl.on('close', () => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'done', _sessionId: sessionId })); });
 
       let stderr = '';
       proc.stderr.on('data', (d) => { stderr += d.toString(); });
       proc.on('close', (code) => {
         if (code !== 0) {
-          ws.send(JSON.stringify({ type: 'error', message: 'Claude CLI exited with code ' + code + (stderr ? ' — ' + stderr.slice(0, 300) : ''), _sessionId: sessionId }));
+          if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'error', message: 'Claude CLI exited with code ' + code + (stderr ? ' — ' + stderr.slice(0, 300) : ''), _sessionId: sessionId }));
         }
       });
     });
 
-    ws.on('close', () => console.log('WebSocket disconnected:', wsId));
+    ws.on('close', () => {});
   });
 }
+
+// ---- Exports for testing ----
+export { handleRequest, validatePathParam };
 
 // ---- Start ----
 async function main() {
@@ -456,4 +501,8 @@ async function main() {
   });
 }
 
-main().catch(err => { console.error(err); process.exit(1); });
+// Only start the server when executed directly (not when imported for tests)
+const runningDirectly = process.argv[1] && resolve(fileURLToPath(import.meta.url)) === resolve(process.argv[1]);
+if (runningDirectly) {
+  main().catch(err => { console.error(err); process.exit(1); });
+}
