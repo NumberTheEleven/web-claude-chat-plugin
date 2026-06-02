@@ -1207,3 +1207,230 @@ h6.md-heading { font-size: 12px; }
   font-size: 11px;
   color: #e53e3e;
 }
+
+/* ====== Mobile Responsive (max-width: 768px) ====== */
+@media (max-width: 768px) {
+  body {
+    overflow: hidden;
+  }
+
+  #app {
+    flex-direction: column;
+    position: relative;
+  }
+
+  /* Sidebar and toolPanel hidden by default; shown via bottom tab */
+  #sidebar {
+    display: none;
+    width: 100%;
+    min-width: 0;
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 56px; /* tab bar height */
+    z-index: 10;
+    background: var(--card-bg);
+  }
+
+  #toolPanel {
+    display: none;
+    width: 100%;
+    min-width: 0;
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 56px;
+    z-index: 10;
+    background: var(--card-bg);
+  }
+
+  #mainArea {
+    width: 100%;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* Mobile tab classes: controlled by JS */
+  #app.mobile-tab-history #sidebar {
+    display: flex;
+    flex-direction: column;
+  }
+  #app.mobile-tab-history #mainArea {
+    display: none;
+  }
+  #app.mobile-tab-todos #toolPanel {
+    display: flex;
+    flex-direction: column;
+  }
+  #app.mobile-tab-todos #mainArea {
+    display: none;
+  }
+
+  /* Bottom Tab Bar */
+  #mobileTabBar {
+    display: flex;
+    flex-shrink: 0;
+    height: 56px;
+    background: var(--card-bg);
+    border-top: 1px solid var(--border);
+    z-index: 20;
+    padding-bottom: env(safe-area-inset-bottom, 0);
+  }
+  #mobileTabBar .tab-btn {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    border: none;
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 10px;
+    font-family: inherit;
+    cursor: pointer;
+    padding: 6px 4px;
+    position: relative;
+    -webkit-tap-highlight-color: transparent;
+  }
+  #mobileTabBar .tab-btn .tab-icon {
+    font-size: 20px;
+    line-height: 1;
+  }
+  #mobileTabBar .tab-btn.active {
+    color: var(--accent-text);
+  }
+  #mobileTabBar .tab-btn.active::after {
+    content: '';
+    position: absolute;
+    bottom: 0;
+    left: 25%;
+    right: 25%;
+    height: 2px;
+    background: var(--accent);
+  }
+
+  /* Input area: fixed bottom */
+  #inputArea {
+    flex-shrink: 0;
+    padding: 8px 12px;
+    padding-bottom: max(8px, env(safe-area-inset-bottom, 8px));
+    gap: 8px;
+  }
+
+  #userInput {
+    font-size: 16px; /* prevent iOS zoom on focus */
+    padding: 8px 12px;
+  }
+
+  #sendBtn {
+    min-width: 44px;
+    min-height: 44px;
+    padding: 8px 16px;
+    font-size: 14px;
+  }
+
+  /* Messages: add bottom padding to clear input area */
+  #messages {
+    padding: 12px;
+    padding-bottom: 16px;
+    -webkit-overflow-scrolling: touch;
+    overflow-y: auto;
+  }
+
+  /* Message bubble max-width adjustment */
+  .msg { max-width: 92%; }
+
+  /* Code block mobile */
+  .code-body {
+    max-height: 250px;
+    font-size: 12px;
+    padding: 8px 10px;
+  }
+  .code-expand {
+    min-height: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  /* Diff block mobile */
+  .diff-header {
+    min-height: 40px;
+    padding: 6px 12px;
+  }
+  .diff-body {
+    max-height: 200px;
+  }
+
+  /* Tool group mobile */
+  .tool-group-header {
+    min-height: 40px;
+    padding: 8px 12px;
+  }
+
+  /* Command dropdown mobile: position above input */
+  .cmd-dropdown {
+    max-height: 200px;
+  }
+  .cmd-item {
+    padding: 10px 12px;
+    min-height: 44px;
+  }
+
+  /* Table mobile: smaller font */
+  .md-table-wrap {
+    font-size: 11px;
+  }
+  .md-table th, .md-table td {
+    padding: 4px 8px;
+  }
+
+  /* Sidebar/session list mobile */
+  .session-item {
+    padding: 10px 12px;
+    min-height: 40px;
+  }
+  .session-list {
+    -webkit-overflow-scrolling: touch;
+  }
+
+  /* Tool panel mobile */
+  #toolPanel {
+    -webkit-overflow-scrolling: touch;
+  }
+
+  /* Todo items mobile */
+  .todo-item {
+    padding: 8px 10px;
+    min-height: 44px;
+  }
+  .todo-checkbox {
+    width: 20px;
+    height: 20px;
+  }
+
+  /* Mermaid mobile */
+  .mermaid-svg {
+    padding: 8px;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  /* History list mobile */
+  .history-item {
+    padding: 8px 10px;
+    min-height: 36px;
+  }
+}
+
+/* Desktop: hide mobile tab bar */
+@media (min-width: 769px) {
+  #mobileTabBar {
+    display: none !important;
+  }
+}

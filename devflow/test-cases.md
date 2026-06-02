@@ -139,4 +139,269 @@
 
 ---
 
+---
+
+## 移动端响应式适配 + QR码扫码 测试用例
+
+### TC-011: 桌面端 CSS 断点以上布局不变
+
+**Status:** done
+**Covers:** R-019 (CSS 移动端断点), R-028 (桌面端零退化)
+**Type:** manual
+**Steps:**
+1. 桌面 Chrome 窗口宽度 ≥1280px 打开 web-chat
+2. 检查三栏布局（侧边栏 / 主聊天区 / 工具面板）
+3. 检查底部 Tab 栏不显示
+4. 发送消息、查看历史、切换会话、使用待办面板
+
+**Expected Result:** 所有布局和功能与改造前完全一致，无任何视觉或功能退化
+
+---
+
+### TC-012: 移动端宽度触发单栏布局
+
+**Status:** done
+**Covers:** R-019 (CSS 移动端断点)
+**Type:** manual
+**Steps:**
+1. Chrome DevTools 切换到移动端模式（如 iPhone 14, 390x844）
+2. 打开 web-chat
+3. 观察布局
+
+**Expected Result:** 主聊天区占满全宽，侧边栏和工具面板默认隐藏，底部 Tab 栏可见，无横向滚动条
+
+---
+
+### TC-013: 中间宽度（769px~1280px）三栏布局保持
+
+**Status:** done
+**Covers:** R-019 (CSS 移动端断点), R-028 (桌面端零退化)
+**Type:** manual
+**Steps:**
+1. Chrome 窗口宽度设为 900px
+2. 打开 web-chat
+3. 观察布局
+
+**Expected Result:** 三栏布局正常显示，底部 Tab 栏不显示（≥769px 即为桌面模式）
+
+---
+
+### TC-014: 底部 Tab 栏聊天 Tab 默认激活
+
+**Status:** done
+**Covers:** R-020 (底部 Tab 导航栏)
+**Type:** manual
+**Steps:**
+1. 移动端视口打开 web-chat
+2. 观察底部 Tab 栏
+
+**Expected Result:** 聊天 Tab 默认高亮激活，主聊天区可见
+
+---
+
+### TC-015: 底部 Tab 切换到历史面板
+
+**Status:** done
+**Covers:** R-020 (底部 Tab 导航栏), R-021 (移动端侧边栏)
+**Type:** manual
+**Steps:**
+1. 移动端视口，点击底部 Tab 栏的 "历史"
+2. 观察页面变化
+
+**Expected Result:** 历史 Tab 高亮，主聊天区隐藏，侧边栏全宽显示，会话列表可滚动
+
+---
+
+### TC-016: 底部 Tab 切换到待办面板
+
+**Status:** done
+**Covers:** R-020 (底部 Tab 导航栏), R-022 (移动端工具面板)
+**Type:** manual
+**Steps:**
+1. 移动端视口，点击底部 Tab 栏的 "待办"
+2. 观察页面变化
+
+**Expected Result:** 待办 Tab 高亮，主聊天区隐藏，工具面板全宽显示，待办复选框可点击
+
+---
+
+### TC-017: 历史 Tab 选会话后自动切回聊天
+
+**Status:** done
+**Covers:** R-021 (移动端侧边栏)
+**Type:** manual
+**Steps:**
+1. 移动端视口，切换到历史 Tab
+2. 点击一个会话
+3. 观察页面变化
+
+**Expected Result:** 自动切回聊天 Tab，聊天区显示所选会话的消息
+
+---
+
+### TC-018: 移动端发送消息
+
+**Status:** done
+**Covers:** R-023 (移动端输入区域)
+**Type:** manual
+**Steps:**
+1. 移动端视口，在输入框输入文字
+2. 点击发送按钮
+3. 观察消息是否发送成功
+
+**Expected Result:** 消息发送成功，AI 回复正常渲染（代码块、Markdown、Mermaid 等）
+
+---
+
+### TC-019: 移动端输入框固定底部 + 键盘适配
+
+**Status:** done
+**Covers:** R-023 (移动端输入区域)
+**Type:** manual
+**Steps:**
+1. 移动端视口，点击输入框触发软键盘
+2. 观察输入栏位置
+
+**Expected Result:** 输入栏随键盘上移，始终在键盘上方可见，不被遮挡
+
+---
+
+### TC-020: 局域网 URL 输出
+
+**Status:** done
+**Covers:** R-026 (局域网访问 URL 输出)
+**Type:** manual
+**Steps:**
+1. 启动 web-claude-chat 服务
+2. 观察终端输出
+
+**Expected Result:** 终端输出局域网 IP URL（如 `http://192.168.x.x:5xxxx/project/...`），手机同 WiFi 浏览器输入该 URL 可打开页面
+
+---
+
+### TC-021: QR 码扫码访问
+
+**Status:** done
+**Covers:** R-029 (QR 码扫码访问)
+**Type:** manual
+**Steps:**
+1. 桌面端打开 web-chat
+2. 找到页面上的 QR 码
+3. 手机打开相机 / 微信扫一扫，扫描 QR 码
+4. 手机浏览器打开链接
+
+**Expected Result:** QR 码可见，扫码后手机浏览器成功打开聊天页面
+
+---
+
+### TC-022: 斜杠命令触摸选择
+
+**Status:** done
+**Covers:** R-027 (触摸交互适配)
+**Type:** manual
+**Steps:**
+1. 移动端视口，在输入框输入 `/`
+2. 斜杠命令下拉菜单弹出
+3. 手指点击一个命令
+
+**Expected Result:** 命令被选中填入输入框，下拉关闭
+
+---
+
+### TC-023: 代码块展开折叠触摸
+
+**Status:** done
+**Covers:** R-027 (触摸交互适配)
+**Type:** manual
+**Steps:**
+1. 移动端视口，找到一条包含长代码块的 AI 回复
+2. 手指点击展开/折叠按钮
+3. 手指长按代码块区域
+
+**Expected Result:** 展开/折叠按钮正常响应（触摸区域 ≥44px），长按触发文本选择（浏览器默认复制行为）
+
+---
+
+### TC-024: 移动端滚动流畅性
+
+**Status:** done
+**Covers:** R-027 (触摸交互适配)
+**Type:** manual
+**Steps:**
+1. 移动端视口，聊天消息较多时滑动消息列表
+2. 切换到历史 Tab，滑动会话列表
+
+**Expected Result:** 滚动流畅，有 momentum 惯性效果，无卡顿
+
+---
+
+### TC-025: 桌面端 Firefox 兼容性
+
+**Status:** done
+**Covers:** R-028 (桌面端零退化)
+**Type:** manual
+**Steps:**
+1. 桌面 Firefox 打开 web-chat
+2. 验证三栏布局
+3. 发送消息、查看历史、使用斜杠命令
+
+**Expected Result:** 功能和布局与 Chrome 一致，无退化
+
+---
+
+### Token 认证测试用例
+
+### TC-026: Server 生成 Token 并嵌入 LAN URL
+
+**Status:** done
+**Covers:** R-030 (Token 认证加固)
+**Type:** manual
+**Steps:**
+1. 启动 web-claude-chat 服务
+2. 观察终端输出
+
+**Expected Result:** LAN URL 格式为 `http://192.168.x.x:5xxxx/?token=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`
+
+---
+
+### TC-027: 无 Token 访问返回 403
+
+**Status:** done
+**Covers:** R-030 (Token 认证加固)
+**Type:** manual
+**Steps:**
+1. 启动服务，获取 LAN URL
+2. 浏览器访问不带 token 参数的 URL（如 `http://192.168.x.x:5xxxx/`）
+
+**Expected Result:** 页面显示 "Forbidden: invalid or missing token" 或 403 错误
+
+---
+
+### TC-028: 有效 Token 正常访问
+
+**Status:** done
+**Covers:** R-030 (Token 认证加固)
+**Type:** manual
+**Steps:**
+1. 浏览器访问带 token 的完整 URL
+2. 页面正常加载
+3. 发送消息、切换会话、使用待办面板
+
+**Expected Result:** 所有功能正常，API 请求和 WebSocket 连接均携带 token
+
+---
+
+### TC-029: QR 码包含 Token
+
+**Status:** done
+**Covers:** R-030 (Token 认证加固), R-029 (QR 码扫码访问)
+**Type:** manual
+**Steps:**
+1. 桌面端打开 web-chat（带 token 的 URL）
+2. 查看 QR 码内容
+
+**Expected Result:** QR 码指向的 URL 包含 token 参数，扫码后无需手动输入 token
+
+---
+
 *Tracked by DevFlow. Do not edit manually.*

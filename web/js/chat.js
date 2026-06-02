@@ -1,4 +1,13 @@
 // ====== URL-based project routing ======
+const urlParams = new URLSearchParams(window.location.search);
+const AUTH_TOKEN = urlParams.get('token') || '';
+
+function apiUrl(path) {
+  if (!AUTH_TOKEN) return path;
+  const sep = path.includes('?') ? '&' : '?';
+  return path + sep + 'token=' + encodeURIComponent(AUTH_TOKEN);
+}
+
 function getProjectFromUrl() {
   const match = window.location.pathname.match(/^\/project\/([^/]+)/);
   return match ? decodeURIComponent(match[1]) : null;
@@ -51,12 +60,14 @@ const todoAddBtn = document.getElementById('todoAddBtn');
 const statusBar = document.getElementById('statusBar');
 const cmdDropdown = document.getElementById('cmdDropdown');
 const historyList = document.getElementById('historyList');
+const mobileTabBar = document.getElementById('mobileTabBar');
+const appEl = document.getElementById('app');
 
 let SLASH_COMMANDS = [];
 
 async function loadCommands() {
   try {
-    const resp = await fetch('/api/commands');
+    const resp = await fetch(apiUrl('/api/commands'));
     if (resp.ok) {
       SLASH_COMMANDS = await resp.json();
     }
@@ -147,7 +158,7 @@ function formatDuration(ms) {
 // ====== Project picker ======
 async function loadProjects() {
   try {
-    const res = await fetch('/api/projects');
+    const res = await fetch(apiUrl('/api/projects'));
     const projects = await res.json();
     projectPicker.innerHTML = '';
     if (projects.length === 0) {
@@ -193,7 +204,7 @@ projectPicker.addEventListener('change', () => {
 // ====== Session list sidebar ======
 async function loadSessionNames() {
   try {
-    const res = await fetch(`/api/sessions/names?project=${encodeURIComponent(state.project)}`);
+    const res = await fetch(apiUrl(`/api/sessions/names?project=${encodeURIComponent(state.project)}`));
     state.sessionNames = await res.json();
   } catch (e) {
     console.error('Failed to load session names', e);
@@ -202,7 +213,7 @@ async function loadSessionNames() {
 
 async function saveSessionName(sessionId, name) {
   try {
-    await fetch(`/api/sessions/${sessionId}/name?project=${encodeURIComponent(state.project)}`, {
+    await fetch(apiUrl(`/api/sessions/${sessionId}/name?project=${encodeURIComponent(state.project)}`), {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name: name })
@@ -220,7 +231,7 @@ async function saveSessionName(sessionId, name) {
 async function refreshSessionList() {
   await loadSessionNames();
   try {
-    const res = await fetch(`/api/sessions?project=${encodeURIComponent(state.project)}`);
+    const res = await fetch(apiUrl(`/api/sessions?project=${encodeURIComponent(state.project)}`));
     const sessions = await res.json();
     sessionList.innerHTML = '';
 
@@ -380,6 +391,9 @@ async function switchSession(sessionId) {
   const saved = state.sessionStatus[sessionId];
   setStatus(saved || 'idle');
 
+  // Auto-switch to chat tab on mobile
+  switchToMobileTab('chat');
+
   const targetId = sessionId;
   addProcessing();
   loadQuestions(10).then(() => {
@@ -435,7 +449,7 @@ async function loadQuestions(limit = 10, before = null) {
     let url = `/api/sessions/${state.sessionId}/questions?project=${encodeURIComponent(state.project)}&limit=${limit}`;
     if (before != null) url += `&before=${before}`;
 
-    const res = await fetch(url);
+    const res = await fetch(apiUrl(url));
     const data = await res.json();
     const questions = data.questions || [];
 
@@ -474,7 +488,7 @@ function jumpToQuestion(index) {
   const oldest = state.oldestQuestionIndex;
   if (oldest != null && index < oldest) {
     const url = `/api/sessions/${state.sessionId}/messages?project=${encodeURIComponent(state.project)}&fromIndex=${index}&toIndex=${oldest}`;
-    fetch(url).then(res => res.json()).then(data => {
+    fetch(apiUrl(url)).then(res => res.json()).then(data => {
       if (state._jumpSerial !== targetId) return;
       prependMessages(data.messages || data);
       state.oldestQuestionIndex = index;
@@ -579,7 +593,7 @@ async function loadSessionHistory(sessionId, fromIndex = null) {
     let url = `/api/sessions/${sessionId}/messages?project=${encodeURIComponent(state.project)}`;
     if (fromIndex != null) url += `&fromIndex=${fromIndex}`;
 
-    const res = await fetch(url);
+    const res = await fetch(apiUrl(url));
     const data = await res.json();
     const messages = data.messages || data;
 
@@ -636,7 +650,8 @@ async function loadSessionHistory(sessionId, fromIndex = null) {
 
 function connect() {
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const wsUrl = `${protocol}//${location.host}/ws/chat`;
+  let wsUrl = `${protocol}//${location.host}/ws/chat`;
+  if (AUTH_TOKEN) wsUrl += '?token=' + encodeURIComponent(AUTH_TOKEN);
   state.ws = new WebSocket(wsUrl);
 
   state.ws.onopen = () => {
@@ -1638,6 +1653,367 @@ function refreshHistory() {
   }
 }
 
+// ====== Mobile Tab Bar ======
+if (mobileTabBar) {
+  mobileTabBar.addEventListener('click', (e) => {
+    const btn = e.target.closest('.tab-btn');
+    if (!btn) return;
+    const tab = btn.dataset.tab;
+    switchToMobileTab(tab);
+  });
+}
+
+function switchToMobileTab(tab) {
+  if (mobileTabBar) {
+    mobileTabBar.querySelectorAll('.tab-btn').forEach(b => {
+      b.classList.toggle('active', b.dataset.tab === tab);
+    });
+  }
+  appEl.classList.remove('mobile-tab-history', 'mobile-tab-todos');
+  if (tab === 'history') {
+    appEl.classList.add('mobile-tab-history');
+    refreshSessionList();
+  } else if (tab === 'todos') {
+    appEl.classList.add('mobile-tab-todos');
+  }
+  // 'chat' tab = default (no extra class)
+}
+
+// ====== Keyboard adaptation for mobile ======
+if (window.visualViewport) {
+  const vv = window.visualViewport;
+  const adjustInputForKeyboard = () => {
+    const keyboardHeight = window.innerHeight - vv.height;
+    if (keyboardHeight > 100) {
+      document.body.style.setProperty('--keyboard-height', keyboardHeight + 'px');
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    } else {
+      document.body.style.setProperty('--keyboard-height', '0px');
+    }
+  };
+  vv.addEventListener('resize', adjustInputForKeyboard);
+  vv.addEventListener('scroll', adjustInputForKeyboard);
+}
+
+// ====== QR Code Generator (pure Canvas API, zero dependencies) ======
+function generateQRCode(text, canvas) {
+  // QR version 6, byte mode, L-level error correction (ECL)
+  // Max data capacity for version 6 byte mode L: 106 bytes
+  const V = 6;
+  const SIZE = 21 + (V - 1) * 4; // 41 modules
+
+  // --- GF(256) arithmetic ---
+  const EXP = new Uint8Array(512);
+  const LOG = new Uint8Array(256);
+  (function initGF() {
+    let x = 1;
+    for (let i = 0; i < 255; i++) {
+      EXP[i] = x;
+      EXP[i + 255] = x;
+      LOG[x] = i;
+      x = (x << 1) ^ ((x & 0x80) ? 0x11d : 0);
+    }
+    LOG[1] = 0;
+  })();
+
+  function gfMul(a, b) {
+    if (a === 0 || b === 0) return 0;
+    return EXP[LOG[a] + LOG[b]];
+  }
+
+  function gfPolyMul(p1, p2) {
+    const out = new Uint8Array(p1.length + p2.length - 1);
+    for (let i = 0; i < p1.length; i++) {
+      for (let j = 0; j < p2.length; j++) {
+        out[i + j] ^= gfMul(p1[i], p2[j]);
+      }
+    }
+    return out;
+  }
+
+  function rsGeneratorPoly(nsym) {
+    let g = new Uint8Array([1]);
+    for (let i = 0; i < nsym; i++) {
+      g = gfPolyMul(g, new Uint8Array([1, EXP[i]]));
+    }
+    return g;
+  }
+
+  function rsEncode(data, nsym) {
+    const gen = rsGeneratorPoly(nsym);
+    const res = new Uint8Array(data.length + nsym);
+    res.set(data);
+    for (let i = 0; i < data.length; i++) {
+      const coef = res[i];
+      if (coef !== 0) {
+        for (let j = 0; j < gen.length; j++) {
+          res[i + j] ^= gfMul(gen[j], coef);
+        }
+      }
+    }
+    res.set(data);
+    return res;
+  }
+
+  // --- Data encoding ---
+  const dataBytes = new TextEncoder().encode(text);
+  if (dataBytes.length > 106) {
+    canvas.getContext('2d').fillText('URL too long', 10, 20);
+    return;
+  }
+  const charCount = dataBytes.length;
+
+  // Byte mode encoding: mode indicator (0100) + count (8 bits) + data bytes
+  const dataBits = [];
+  dataBits.push(0, 1, 0, 0); // 0100 = byte mode
+  for (let i = 7; i >= 0; i--) dataBits.push((charCount >> i) & 1);
+  for (const b of dataBytes) {
+    for (let i = 7; i >= 0; i--) dataBits.push((b >> i) & 1);
+  }
+
+  // Terminator (up to 4 zeros)
+  const totalCodewords = 172; // Version 6 total codewords (L)
+  const ecCodewords = 18;     // Version 6 EC codewords (L)
+  const dataCodewords = totalCodewords - ecCodewords; // 154
+  const requiredBits = dataCodewords * 8;
+  const termBits = Math.min(4, requiredBits - dataBits.length);
+  for (let i = 0; i < termBits; i++) dataBits.push(0);
+
+  // Pad to byte
+  while (dataBits.length % 8 !== 0) dataBits.push(0);
+
+  // Pad bytes (0xEC, 0x11 alternating)
+  const padBytes = [0xEC, 0x11];
+  let pi = 0;
+  while (dataBits.length < requiredBits) {
+    const b = padBytes[pi % 2];
+    for (let i = 7; i >= 0; i--) dataBits.push((b >> i) & 1);
+    pi++;
+  }
+
+  // Convert bits to bytes
+  const msgPoly = new Uint8Array(dataCodewords);
+  for (let i = 0; i < dataCodewords; i++) {
+    let v = 0;
+    for (let j = 0; j < 8; j++) v = (v << 1) | dataBits[i * 8 + j];
+    msgPoly[i] = v;
+  }
+
+  // RS encode
+  const full = rsEncode(msgPoly, ecCodewords);
+
+  // --- Matrix construction ---
+  const matrix = new Uint8Array(SIZE * SIZE);
+  matrix.fill(0xff); // 0xff = unknown (will be set to 0 or 1)
+
+  // Finder patterns
+  function placeFinder(row, col) {
+    for (let r = -1; r <= 7; r++) {
+      for (let c = -1; c <= 7; c++) {
+        const rr = row + r, cc = col + c;
+        if (rr < 0 || rr >= SIZE || cc < 0 || cc >= SIZE) continue;
+        const v = (r >= 0 && r <= 6 && c >= 0 && c <= 6 && (r === 0 || r === 6 || c === 0 || c === 6 || (r >= 2 && r <= 4 && c >= 2 && c <= 4))) ? 1 : 0;
+        matrix[rr * SIZE + cc] = v;
+      }
+    }
+  }
+  placeFinder(0, 0);
+  placeFinder(0, SIZE - 7);
+  placeFinder(SIZE - 7, 0);
+
+  // Timing patterns
+  for (let i = 8; i < SIZE - 8; i++) {
+    matrix[6 * SIZE + i] = i % 2 === 0 ? 1 : 0;
+    matrix[i * SIZE + 6] = i % 2 === 0 ? 1 : 0;
+  }
+
+  // Dark module
+  matrix[(SIZE - 8) * SIZE + 8] = 1;
+
+  // Alignment pattern for version 6 (center at 6, 34)
+  const alignCenters = [6, 34];
+  for (const ar of alignCenters) {
+    for (const ac of alignCenters) {
+      if ((ar === 6 && ac === 6) || (ar === 6 && ac === 34 && false) ||
+          !(ar === 6 && ac === 34) && !(ar === 34 && ac === 6)) {
+        // Place all except those overlapping finders
+        let overlaps = false;
+        // Check overlap with finder at top-left
+        if (ar - 2 < 8 && ac - 2 < 8) overlaps = true;
+        // Check overlap with finder at top-right
+        if (ar - 2 < 8 && ac + 2 >= SIZE - 8) overlaps = true;
+        // Check overlap with finder at bottom-left
+        if (ar + 2 >= SIZE - 8 && ac - 2 < 8) overlaps = true;
+        if (!overlaps) {
+          for (let r = -2; r <= 2; r++) {
+            for (let c = -2; c <= 2; c++) {
+              const rr = ar + r, cc = ac + c;
+              if (rr < 0 || rr >= SIZE || cc < 0 || cc >= SIZE) continue;
+              const v = (r === -2 || r === 2 || c === -2 || c === 2 || (r === 0 && c === 0)) ? 1 : 0;
+              matrix[rr * SIZE + cc] = v;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Format info and version info will be placed after mask selection
+  // Place data modules
+  const dataModuleBits = [];
+  for (let i = 0; i < full.length; i++) {
+    for (let j = 7; j >= 0; j--) dataModuleBits.push((full[i] >> j) & 1);
+  }
+
+  // Module placement order (zigzag upward/downward alternating)
+  let bitIdx = 0;
+  let upward = true;
+  for (let col = SIZE - 1; col >= 0; col -= 2) {
+    if (col === 6) col = 5; // Skip timing pattern column
+    const rows = upward
+      ? Array.from({ length: SIZE }, (_, i) => SIZE - 1 - i)
+      : Array.from({ length: SIZE }, (_, i) => i);
+    for (const row of rows) {
+      for (let c = col; c >= col - 1 && c >= 0; c--) {
+        if (c >= SIZE) continue;
+        if (matrix[row * SIZE + c] === 0xff) {
+          matrix[row * SIZE + c] = bitIdx < dataModuleBits.length ? dataModuleBits[bitIdx++] : 0;
+        }
+      }
+    }
+    upward = !upward;
+  }
+
+  // Reserve format info areas
+  function reserveFormatAreas() {
+    for (let i = 0; i <= 8; i++) {
+      if (matrix[i * SIZE + 8] === 0xff) matrix[i * SIZE + 8] = 0;
+      if (i < 9 && matrix[8 * SIZE + i] === 0xff) matrix[8 * SIZE + i] = 0;
+    }
+    for (let i = 0; i <= 7; i++) {
+      if (matrix[(SIZE - 1 - i) * SIZE + 8] === 0xff) matrix[(SIZE - 1 - i) * SIZE + 8] = 0;
+      if (i < 8 && matrix[8 * SIZE + (SIZE - 1 - i)] === 0xff) matrix[8 * SIZE + (SIZE - 1 - i)] = 0;
+    }
+  }
+  reserveFormatAreas();
+
+  // --- Mask pattern evaluation ---
+  const formatInfo = 0x5412; // ECL=L, mask=2
+  // We'll just use mask 2 which works well
+  const maskPattern = 2;
+
+  // Apply mask
+  function maskFn(r, c) {
+    switch (maskPattern) {
+      case 0: return (r + c) % 2 === 0;
+      case 1: return r % 2 === 0;
+      case 2: return c % 3 === 0;
+      case 3: return (r + c) % 3 === 0;
+      case 4: return (Math.floor(r / 2) + Math.floor(c / 3)) % 2 === 0;
+      case 5: return ((r * c) % 2) + ((r * c) % 3) === 0;
+      case 6: return (((r * c) % 2) + ((r * c) % 3)) % 2 === 0;
+      case 7: return (((r + c) % 2) + ((r * c) % 3)) % 2 === 0;
+    }
+    return false;
+  }
+
+  // Apply mask to data modules (skip function patterns)
+  const reserved = new Set();
+  // Mark finders, timing, etc. as reserved
+  for (let r = 0; r < SIZE; r++) {
+    for (let c = 0; c < SIZE; c++) {
+      // Simple heuristic: any non-0xff value was placed by function patterns
+      // But we changed 0xff to 0 for data, so check original finder areas
+      if ((r <= 8 && c <= 8) || (r <= 8 && c >= SIZE - 8) || (r >= SIZE - 8 && c <= 8)) reserved.add(r * SIZE + c);
+      if (r === 6 || c === 6) reserved.add(r * SIZE + c);
+    }
+  }
+
+  // Re-fill data modules (they were set to 0 by reserveFormatAreas)
+  // Actually, let me simplify: just re-do the data placement with mask applied
+  bitIdx = 0;
+  for (let col = SIZE - 1; col >= 0; col -= 2) {
+    if (col === 6) col = 5;
+    for (let row = SIZE - 1; row >= 0; row--) {
+      for (let c = col; c >= col - 1; c--) {
+        if (c < 0 || c >= SIZE) continue;
+        if (matrix[row * SIZE + c] === 0xff) {
+          if (bitIdx < dataModuleBits.length) {
+            let bit = dataModuleBits[bitIdx++];
+            if (maskFn(row, c)) bit ^= 1;
+            matrix[row * SIZE + c] = bit;
+          } else {
+            matrix[row * SIZE + c] = maskFn(row, c) ? 1 : 0;
+          }
+        }
+      }
+    }
+  }
+
+  // Place format info bits
+  function placeFormatInfo(info) {
+    const bits = [];
+    for (let i = 14; i >= 0; i--) bits.push((info >> i) & 1);
+    // Top-left
+    let bi = 0;
+    for (let i = 0; i <= 5; i++) { matrix[i * SIZE + 8] = bits[bi++]; }
+    matrix[7 * SIZE + 8] = bits[bi++];
+    matrix[8 * SIZE + 8] = bits[bi++];
+    matrix[8 * SIZE + 7] = bits[bi++];
+    for (let i = 5; i >= 0; i--) { matrix[8 * SIZE + i] = bits[bi++]; }
+    // Top-right + bottom-left
+    bi = 0;
+    for (let i = SIZE - 1; i >= SIZE - 7; i--) { matrix[8 * SIZE + i] = bits[bi++]; }
+    for (let i = 0; i <= 7; i++) { matrix[(SIZE - 1 - i) * SIZE + 8] = bits[bi++]; }
+  }
+  placeFormatInfo(formatInfo);
+
+  // --- Draw to canvas ---
+  const moduleSize = Math.floor(Math.min(canvas.width, canvas.height) / (SIZE + 8));
+  const offsetX = Math.floor((canvas.width - SIZE * moduleSize) / 2);
+  const offsetY = Math.floor((canvas.height - SIZE * moduleSize) / 2);
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = '#1e293b';
+  for (let r = 0; r < SIZE; r++) {
+    for (let c = 0; c < SIZE; c++) {
+      if (matrix[r * SIZE + c]) {
+        ctx.fillRect(offsetX + c * moduleSize, offsetY + r * moduleSize, moduleSize, moduleSize);
+      }
+    }
+  }
+}
+
+function renderQRCode() {
+  // Only show on desktop
+  if (window.innerWidth < 769) return;
+
+  let qrContainer = document.getElementById('qrCodeContainer');
+  if (!qrContainer) {
+    qrContainer = document.createElement('div');
+    qrContainer.id = 'qrCodeContainer';
+    qrContainer.style.cssText = 'position:fixed;bottom:20px;right:20px;z-index:50;background:white;padding:10px;border:1px solid var(--border, #e2e8f0);box-shadow:0 2px 8px rgba(0,0,0,0.1);cursor:pointer;';
+    qrContainer.title = '手机扫码访问';
+    document.body.appendChild(qrContainer);
+  }
+
+  const lanUrl = window.location.origin + window.location.pathname;
+  const size = 150;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  generateQRCode(lanUrl, canvas);
+
+  const label = document.createElement('div');
+  label.textContent = '📱 扫码访问';
+  label.style.cssText = 'text-align:center;font-size:11px;color:#64748b;margin-top:4px;';
+
+  qrContainer.innerHTML = '';
+  qrContainer.appendChild(canvas);
+  qrContainer.appendChild(label);
+}
+
 // ====== Init ======
 showEmptyState();
 loadProjects().then(() => {
@@ -1664,3 +2040,15 @@ loadProjects().then(() => {
   }
 });
 connect();
+
+// Render QR code on desktop; re-render on resize
+renderQRCode();
+window.addEventListener('resize', () => {
+  const qr = document.getElementById('qrCodeContainer');
+  if (window.innerWidth < 769 && qr) {
+    qr.style.display = 'none';
+  } else if (window.innerWidth >= 769) {
+    if (qr) qr.style.display = '';
+    renderQRCode();
+  }
+});

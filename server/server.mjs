@@ -5,6 +5,7 @@ import { join, extname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { spawn } from 'child_process';
 import { lookup } from 'dns/promises';
+import { networkInterfaces } from 'os';
 import { createInterface } from 'readline';
 import { randomUUID } from 'crypto';
 import { WebSocketServer, WebSocket } from 'ws';
@@ -39,7 +40,7 @@ async function findFreePort() {
       const s = createServer();
       await new Promise((resolve, reject) => {
         s.on('error', reject);
-        s.listen(port, '127.0.0.1', () => {
+        s.listen(port, '0.0.0.0', () => {
           s.close(() => resolve());
         });
       });
@@ -351,13 +352,21 @@ async function handleSessionNames(res, project, method, sessionId, body) {
 }
 
 // ---- Route Dispatch ----
-async function handleRequest(req, res) {
+async function handleRequest(req, res, token = null) {
   let url;
   try { url = new URL(req.url, 'http://localhost'); } catch {
     res.writeHead(400);
     res.end('Bad Request: malformed URL');
     return;
   }
+
+  // Token validation — when configured, all requests must include valid token
+  if (token && url.searchParams.get('token') !== token) {
+    res.writeHead(403);
+    res.end('Forbidden: invalid or missing token');
+    return;
+  }
+
   const path = url.pathname;
   const method = req.method;
 
@@ -431,8 +440,25 @@ async function handleRequest(req, res) {
 }
 
 // ---- WebSocket ----
-function setupWebSocket(server) {
-  const wss = new WebSocketServer({ server, path: '/ws/chat' });
+function setupWebSocket(server, token) {
+  const wss = new WebSocketServer({ noServer: true });
+
+  server.on('upgrade', (request, socket, head) => {
+    try {
+      const url = new URL(request.url, 'http://localhost');
+      if (url.pathname !== '/ws/chat') { socket.destroy(); return; }
+      if (token && url.searchParams.get('token') !== token) {
+        socket.end('HTTP/1.1 403 Forbidden\r\n\r\n');
+        socket.destroy();
+        return;
+      }
+      wss.handleUpgrade(request, socket, head, (ws) => {
+        wss.emit('connection', ws, request);
+      });
+    } catch {
+      socket.destroy();
+    }
+  });
 
   wss.on('connection', (ws) => {
     const wsId = randomUUID();
@@ -492,14 +518,31 @@ function setupWebSocket(server) {
 // ---- Exports for testing ----
 export { handleRequest, validatePathParam };
 
+function getLanAddress() {
+  const ifaces = networkInterfaces();
+  for (const name of Object.keys(ifaces)) {
+    for (const iface of ifaces[name]) {
+      if (iface.family === 'IPv4' && !iface.internal) {
+        return iface.address;
+      }
+    }
+  }
+  return null;
+}
+
 // ---- Start ----
 async function main() {
   const port = await findFreePort();
-  const server = createServer(handleRequest);
-  setupWebSocket(server);
+  const AUTH_TOKEN = randomUUID();
+  const server = createServer((req, res) => handleRequest(req, res, AUTH_TOKEN));
+  setupWebSocket(server, AUTH_TOKEN);
 
-  server.listen(port, '127.0.0.1', async () => {
+  server.listen(port, '0.0.0.0', async () => {
+    const lanIp = getLanAddress();
     console.log('claude-chat running on port ' + port);
+    if (lanIp) {
+      console.log('LAN: http://' + lanIp + ':' + port + '/?token=' + AUTH_TOKEN);
+    }
     // Write port file
     await mkdir(join(process.env.USERPROFILE, '.claude', 'tmp'), { recursive: true });
     await writeFile(PORT_FILE, String(port), 'utf-8');

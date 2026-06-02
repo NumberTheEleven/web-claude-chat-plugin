@@ -114,4 +114,78 @@
 
 ---
 
+## T-013: server.mjs 绑定 0.0.0.0 + 局域网 URL 输出
+
+**Status:** done
+**Covers:** R-026
+**Complexity:** low
+**Files:** server/server.mjs
+**Depends On:** none
+**Description:** Server 绑定 0.0.0.0 而非 127.0.0.1，启动后自动获取局域网 IP 并输出 URL。
+
+## T-014: CSS 移动端基础断点与布局切换
+
+**Status:** done
+**Covers:** R-019
+**Complexity:** medium
+**Files:** web/css/chat.css
+**Depends On:** none
+**Description:** 添加 @media (max-width: 768px) 断点，三栏变单栏垂直堆叠，侧边栏和工具面板默认隐藏，body overflow 处理。
+
+## T-015: 底部 Tab 栏 HTML + JS 切换逻辑
+
+**Status:** done
+**Covers:** R-020, R-021, R-022
+**Complexity:** medium
+**Files:** web/index.html, web/js/chat.js
+**Depends On:** T-014
+**Description:** HTML 添加底部 Tab 栏 DOM（聊天/历史/待办）。JS 实现 Tab 切换逻辑，选会话后自动切回聊天 Tab。
+
+## T-016: 移动端输入区域固定底部 + 键盘适配
+
+**Status:** done
+**Covers:** R-023
+**Complexity:** low
+**Files:** web/css/chat.css, web/js/chat.js
+**Depends On:** T-014
+**Description:** 输入栏固定视口底部，safe-area-inset 处理，发送按钮最小触摸尺寸 44px，键盘弹出适配。
+
+## T-017: 移动端触摸交互适配 + 样式收尾
+
+**Status:** done
+**Covers:** R-021, R-022, R-027
+**Complexity:** low
+**Files:** web/css/chat.css, web/js/chat.js
+**Depends On:** T-014, T-015
+**Description:** 斜杠命令下拉触摸选择、代码块触摸优化（展开折叠≥44px、长按复制）、滚动区 momentum 样式。侧边栏/工具面板移动端全宽样式收尾。
+
+## T-018: QR 码生成（纯前端 Canvas API）
+
+**Status:** done
+**Covers:** R-029
+**Complexity:** medium
+**Files:** web/js/chat.js, web/css/chat.css
+**Depends On:** T-013
+**Description:** 桌面端页面展示 QR 码，包含局域网 URL。纯前端 Canvas API 实现，零外部依赖。
+
+## T-019: 桌面端零退化验证 + 最终收尾
+
+**Status:** done
+**Covers:** R-028
+**Complexity:** low
+**Files:** 全部
+**Depends On:** T-013, T-014, T-015, T-016, T-017, T-018
+**Description:** 验证桌面 Chrome/Firefox ≥1280px 所有功能与改造前一致。CSS 动画和过渡在移动端适配。最终代码审查。现有测试全部通过。
+
+## T-020: Token 认证加固
+
+**Status:** done
+**Covers:** R-026 (扩展)
+**Complexity:** low
+**Files:** server/server.mjs, web/js/chat.js
+**Depends On:** T-013
+**Description:** Server 启动时生成 randomUUID 作为 AUTH_TOKEN，嵌入 LAN URL 输出。所有 HTTP 请求和 WebSocket 连接需验证 token 参数（token 不匹配返回 403）。前端从 URL params 读取 token 并自动附加到所有 fetch/WebSocket 请求。
+
+---
+
 *Tracked by DevFlow. Do not edit manually.*

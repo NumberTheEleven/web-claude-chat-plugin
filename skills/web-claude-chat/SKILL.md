@@ -39,11 +39,19 @@ Stops the running chat server.
 
 ## /web-claude-chat (or /web-claude-chat open)
 
-Opens browser to the current session. Server must already be running (use `start` first).
+Opens browser to the current session. If server is not running, auto-starts it first.
 
-1. Read port from `$USERPROFILE/.claude/tmp/claude-chat.port`
-2. If port file doesn't exist, say "Server not running. Use /web-claude-chat start to start it." and STOP
-3. Verify server is alive: `curl -s -o /dev/null -w "%{http_code}" http://localhost:<port>/` — if NOT 200, say "Server on port <port> appears dead. Try /web-claude-chat start." and STOP
-4. Construct URL: `http://localhost:<port>/project/<encoded-cwd>/?session=$CLAUDE_CODE_SESSION_ID`
-   - Encode cwd: replace `:`, `\`, `/` with `-`
-5. Run `powershell -NoProfile -Command "Start-Process '<url>'"`
+1. **Check if server is already running:**
+   - Read port from `$USERPROFILE/.claude/tmp/claude-chat.port` if it exists
+   - If the file exists, curl `http://localhost:<port>/` — if it returns 200, skip to step 3 (open browser)
+2. **Auto-start (server not running or dead):**
+   - Resolve the server directory from this skill's own path: the SKILL.md is at `<plugin_cache>/eleven-marketplace/web-claude-chat/0.1.0/skills/web-claude-chat/SKILL.md`, so `../../server/` relative to this file
+   - `cd` to the server directory
+   - If `node_modules` doesn't exist, run `npm install`
+   - Start the server as a background task via Bash with `run_in_background: true`: `node server.mjs`
+   - Wait up to 3 seconds for the port file `$USERPROFILE/.claude/tmp/claude-chat.port` to appear
+   - Read the port from that file
+3. **Open browser:**
+   - Construct URL: `http://localhost:<port>/project/<encoded-cwd>/?session=$CLAUDE_CODE_SESSION_ID`
+     - Encode cwd: replace `:`, `\`, `/` with `-`
+   - Run `powershell -NoProfile -Command "Start-Process '<url>'"`
