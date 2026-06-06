@@ -1801,7 +1801,11 @@ function showMobilePicker() {
   overlay.querySelector('#pickerCloseBtn').addEventListener('click', closeMobilePicker);
   overlay.querySelector('.picker-backdrop').addEventListener('click', closeMobilePicker);
   overlay.querySelector('#pickerProjectSelect').addEventListener('change', (e) => {
-    window.location.href = '/project/' + encodeURIComponent(e.target.value) + '/';
+    // Preserve token and session from current URL when switching projects
+    const params = new URLSearchParams(window.location.search);
+    let targetUrl = '/project/' + encodeURIComponent(e.target.value) + '/';
+    if (params.toString()) targetUrl += '?' + params.toString();
+    window.location.href = targetUrl;
   });
   overlay.querySelector('#pickerNewBtn').addEventListener('click', () => {
     newSessionBtn.click();
@@ -2128,6 +2132,9 @@ loadProjects().then(() => {
 
   // Connect AFTER session state is restored, so ws.onopen can call loadQuestions()
   connect();
+
+  // Re-render QR code now that project and session are resolved
+  renderQRCode();
 });
 
 // Initialize mermaid lightbox (click-to-zoom)
