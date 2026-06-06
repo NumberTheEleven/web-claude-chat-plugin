@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { handleRequest, validatePathParam } from '../server/server.mjs';
+import { handleRequest, validatePathParam, isVirtualIp, addFirewallRule, removeFirewallRule, _setFirewallExecutor, _resetFirewallExecutor } from '../server/server.mjs';
 
 // ---- Helpers ----
 
@@ -196,6 +196,188 @@ describe('handleRequest - HTTP endpoints', () => {
     // Backslash in project param -> validatePathParam rejects -> 400
     assert.strictEqual(res.statusCode, 400);
     assert.deepStrictEqual(res.parsedBody, { error: 'Invalid parameter' });
+  });
+});
+
+// ============================================================
+// isVirtualIp - virtual network detection (LAN URL fix)
+// ============================================================
+
+describe('isVirtualIp - virtual/WSL2 IP filtering', () => {
+
+  // TC-019: WSL2 vEthernet IPs (192.168.65.x / 192.168.68.x)
+  it('should detect WSL2 vEthernet 192.168.65.x as virtual', () => {
+    assert.strictEqual(isVirtualIp('192.168.65.1'), true);
+    assert.strictEqual(isVirtualIp('192.168.65.107'), true);
+    assert.strictEqual(isVirtualIp('192.168.65.255'), true);
+  });
+
+  it('should detect WSL2 vEthernet 192.168.68.x as virtual', () => {
+    assert.strictEqual(isVirtualIp('192.168.68.1'), true);
+    assert.strictEqual(isVirtualIp('192.168.68.128'), true);
+    assert.strictEqual(isVirtualIp('192.168.68.254'), true);
+  });
+
+  // TC-020: Docker / WSL1 / VPN range (172.16-31.x)
+  it('should detect Docker/WSL1/VPN 172.16-31.x as virtual', () => {
+    assert.strictEqual(isVirtualIp('172.17.0.1'), true);   // Docker default
+    assert.strictEqual(isVirtualIp('172.18.0.1'), true);   // Docker bridge
+    assert.strictEqual(isVirtualIp('172.30.0.5'), true);   // VPN
+    assert.strictEqual(isVirtualIp('172.31.255.255'), true);
+  });
+
+  it('should NOT flag 172.x outside 16-31 range as virtual', () => {
+    assert.strictEqual(isVirtualIp('172.15.0.1'), false);
+    assert.strictEqual(isVirtualIp('172.32.0.1'), false);
+  });
+
+  // TC-021: Link-local addresses (169.254.x.x)
+  it('should detect link-local 169.254.x.x as virtual', () => {
+    assert.strictEqual(isVirtualIp('169.254.1.1'), true);
+    assert.strictEqual(isVirtualIp('169.254.169.254'), true);
+  });
+
+  // TC-022: Real LAN IPs should pass through
+  it('should accept real home/office LAN IPs', () => {
+    assert.strictEqual(isVirtualIp('192.168.1.100'), false);
+    assert.strictEqual(isVirtualIp('192.168.0.5'), false);
+    assert.strictEqual(isVirtualIp('10.0.0.5'), false);
+    assert.strictEqual(isVirtualIp('10.100.200.50'), false);
+  });
+
+  // TC-023: Edge cases
+  it('should handle edge cases gracefully', () => {
+    // Non-standard but valid IPs in 192.168 range that are NOT WSL2
+    assert.strictEqual(isVirtualIp('192.168.64.1'), false);
+    assert.strictEqual(isVirtualIp('192.168.67.1'), false);
+    assert.strictEqual(isVirtualIp('192.168.69.1'), false);
+  });
+});
+
+// ============================================================
+// Firewall Rule Management (R-044 ~ R-048)
+// ============================================================
+
+describe('Firewall rule management', () => {
+  let calls;
+  let mockExec;
+  let originalPlatform;
+  let warnCalls;
+  let logCalls;
+
+  function setupMock(behavior) {
+    calls = [];
+    warnCalls = [];
+    logCalls = [];
+    mockExec = (cmd, args) => {
+      calls.push({ cmd, args });
+      if (behavior === 'throw') throw new Error('Access denied');
+      if (behavior === 'throwOnAdd' && args.includes('add')) throw new Error('Access denied');
+      return Buffer.from('');
+    };
+    _setFirewallExecutor(mockExec);
+    // Capture console output
+    const origWarn = console.warn;
+    const origLog = console.log;
+    console.warn = (...a) => { warnCalls.push(a.join(' ')); };
+    console.log = (...a) => { logCalls.push(a.join(' ')); };
+    return () => {
+      console.warn = origWarn;
+      console.log = origLog;
+      _resetFirewallExecutor();
+    };
+  }
+
+  // TC-037: addFirewallRule constructs correct netsh commands
+  it('TC-037: addFirewallRule constructs correct netsh add command (delete then add)', () => {
+    const restore = setupMock('success');
+    try {
+      addFirewallRule(50123);
+      // Should have 2 calls: delete (cleanup) then add
+      assert.strictEqual(calls.length, 2, 'Expected 2 execFileSync calls (delete + add)');
+      // First call: delete old rule
+      assert.strictEqual(calls[0].cmd, 'netsh');
+      assert.deepStrictEqual(calls[0].args, [
+        'advfirewall', 'firewall', 'delete', 'rule', 'name=Claude Chat Server (port:50123)'
+      ]);
+      // Second call: add new rule
+      assert.strictEqual(calls[1].cmd, 'netsh');
+      assert.deepStrictEqual(calls[1].args, [
+        'advfirewall', 'firewall', 'add', 'rule',
+        'name=Claude Chat Server (port:50123)', 'dir=in', 'action=allow', 'protocol=TCP', 'localport=50123'
+      ]);
+      // Should log success
+      assert.ok(logCalls.some(m => m.includes('Rule added')), 'Should log rule added message');
+    } finally { restore(); }
+  });
+
+  // TC-038: removeFirewallRule constructs correct netsh delete command
+  it('TC-038: removeFirewallRule constructs correct netsh delete command', () => {
+    const restore = setupMock('success');
+    try {
+      removeFirewallRule(50123);
+      assert.strictEqual(calls.length, 1, 'Expected 1 execFileSync call (delete)');
+      assert.strictEqual(calls[0].cmd, 'netsh');
+      assert.deepStrictEqual(calls[0].args, [
+        'advfirewall', 'firewall', 'delete', 'rule', 'name=Claude Chat Server (port:50123)'
+      ]);
+      assert.ok(logCalls.some(m => m.includes('Rule removed')), 'Should log rule removed message');
+    } finally { restore(); }
+  });
+
+  // TC-039: Non-Windows platform skips firewall operations
+  it('TC-039: non-Windows platform skips all firewall operations', () => {
+    const restore = setupMock('success');
+    originalPlatform = process.platform;
+    Object.defineProperty(process, 'platform', { value: 'darwin' });
+    try {
+      addFirewallRule(50123);
+      removeFirewallRule(50123);
+      assert.strictEqual(calls.length, 0, 'No execFileSync calls on non-Windows platform');
+    } finally {
+      Object.defineProperty(process, 'platform', { value: originalPlatform });
+      restore();
+    }
+  });
+
+  // TC-040: Permission error outputs warning with manual command, does not throw
+  it('TC-040: netsh permission error outputs manual command hint and does not throw', () => {
+    const restore = setupMock('throwOnAdd');
+    try {
+      // Should NOT throw
+      assert.doesNotThrow(() => addFirewallRule(50123));
+      // delete call succeeds (call 1), add call throws (call 2)
+      assert.strictEqual(calls.length, 2);
+      // Should warn about admin permissions
+      assert.ok(warnCalls.some(m => m.includes('管理员')), 'Should mention admin privileges');
+      // Should include manual netsh command
+      assert.ok(warnCalls.some(m => m.includes('netsh advfirewall firewall add rule')),
+        'Should include manual netsh command');
+    } finally { restore(); }
+  });
+
+  // TC-041: addFirewallRule handles leftover rule cleanup (delete fails silently, add succeeds)
+  it('TC-041: leftover rule cleanup — delete failure is silently ignored, add succeeds', () => {
+    calls = [];
+    let callIndex = 0;
+    _setFirewallExecutor((cmd, args) => {
+      calls.push({ cmd, args });
+      callIndex++;
+      // First call (delete) throws — rule didn't exist
+      if (callIndex === 1) throw new Error('No rules match the specified criteria');
+      return Buffer.from('');
+    });
+    const origLog = console.log;
+    console.log = () => {};
+    try {
+      assert.doesNotThrow(() => addFirewallRule(50456));
+      assert.strictEqual(calls.length, 2, 'Both delete and add calls should execute');
+      assert.ok(calls[0].args.includes('delete'), 'First call should be delete');
+      assert.ok(calls[1].args.includes('add'), 'Second call should be add');
+    } finally {
+      console.log = origLog;
+      _resetFirewallExecutor();
+    }
   });
 });
 

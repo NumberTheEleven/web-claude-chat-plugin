@@ -188,4 +188,82 @@
 
 ---
 
+## T-021: 修复移动端底部 TabBar 定位异常
+
+**Status:** done
+**Covers:** R-032
+**Complexity:** low
+**Files:** web/css/chat.css
+**Depends On:** none
+**Description:** `#mobileTabBar` 添加 `position: fixed; bottom: 0; left: 0; right: 0`，脱离文档流。同步调整 `#sidebar` 和 `#toolPanel` 的 bottom 值（从 56px 改为适配 fixed tabbar）。确保 PC 端不受影响。
+
+## T-022: 移动端"历史"Tab 改为提问历史列表
+
+**Status:** done
+**Covers:** R-031
+**Complexity:** medium
+**Files:** web/js/chat.js, web/css/chat.css
+**Depends On:** none
+**Description:** CSS：`#app.mobile-tab-history` 改为显示 `#toolPanel`（非 `#sidebar`），隐藏 toolPanel 内非 history 区域。JS：`switchToMobileTab('history')` 调用 `refreshHistory()` 替代 `refreshSessionList()`；history 条目 click 回调中增加自动切回聊天 Tab 逻辑。
+
+---
+
+## T-023: 防火墙规则管理函数（核心）
+
+**Status:** done
+**Covers:** R-044, R-046, R-047
+**Complexity:** medium
+**Files:** server/server.mjs
+**Depends On:** none
+**Description:** 新增 `addFirewallRule(port)` 和 `removeFirewallRule(port)` 两个导出函数。add 函数先 delete 清理残留（静默忽略错误），再 add 添加规则；权限不足时 console.warn 输出中文提示 + 手动命令示例，不阻塞。remove 函数 try/catch 静默处理。非 Windows 平台直接返回。使用 execSync 同步执行。
+
+## T-024: 服务器启动/关闭集成
+
+**Status:** done
+**Covers:** R-044, R-045
+**Complexity:** low
+**Files:** server/server.mjs
+**Depends On:** T-023
+**Description:** 在 main() 的 listen() 回调中调用 addFirewallRule(port)；注册 SIGINT/SIGTERM 信号处理调用 removeFirewallRule(port)；在 export 列表中增加新函数。
+
+## T-025: 防火墙规则管理单元测试
+
+**Status:** done
+**Covers:** R-048
+**Complexity:** medium
+**Files:** test/server.test.mjs
+**Depends On:** T-024
+**Description:** 新增测试用例覆盖 TC-037 ~ TC-041（5 个单元测试），mock execSync 验证命令构造和错误处理。确保现有 18 server + 10 parser 测试全部通过。
+
+---
+
+## T-026: 移动端输入区域底部预留 Tab Bar 空间
+
+**Status:** done
+**Covers:** R-049
+**Complexity:** low
+**Files:** web/css/chat.css
+**Depends On:** none
+**Description:** 修改 @media (max-width: 768px) 内的 CSS 规则，使输入框和消息列表底部不被固定 Tab Bar 遮挡。
+
+## T-027: QR 码 URL 包含项目路径和会话 ID
+
+**Status:** done
+**Covers:** R-050
+**Complexity:** medium
+**Files:** web/js/chat.js
+**Depends On:** none
+**Description:** 修改 renderQRCode() 函数，拼接项目路径和会话 ID 到 QR 码 URL。
+
+## T-028: 移动端 Header 显示项目名和会话名
+
+**Status:** done
+**Covers:** R-051
+**Complexity:** medium
+**Files:** web/css/chat.css, web/js/chat.js
+**Depends On:** none
+**Description:** 修改 updateSessionDisplay() 和移动端 CSS，在 Header 显示项目短名和会话名。
+
+---
+
 *Tracked by DevFlow. Do not edit manually.*

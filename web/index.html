@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Claude Chat</title>
 <link rel="stylesheet" href="/css/chat.css">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
 </head>
 <body>
 <div id="app">
@@ -24,7 +25,10 @@
     <div class="sidebar-section">
       <div class="sidebar-label-row">
         <span class="sidebar-label">会话列表</span>
-        <button id="newSessionBtn" class="btn-new-session" title="新建会话">+</button>
+        <div style="display:flex;gap:4px;">
+          <button id="sessionSearchBtn" class="btn-session-search" title="搜索会话">🔍</button>
+          <button id="newSessionBtn" class="btn-new-session" title="新建会话">+</button>
+        </div>
       </div>
       <div id="sessionList" class="session-list"></div>
     </div>
@@ -34,7 +38,12 @@
   <div id="mainArea">
     <!-- Header -->
     <header id="header">
-      <span class="session-id" id="sessionDisplay">新会话</span>
+      <div id="headerContext" title="点击切换项目/会话">
+        <span class="header-project" id="headerProject"></span>
+        <span class="header-sep">·</span>
+        <span class="session-id" id="sessionDisplay">新会话</span>
+        <span class="header-chevron" id="headerChevron">▼</span>
+      </div>
     </header>
 
     <!-- Messages -->
@@ -56,7 +65,11 @@
 
   <!-- Right Tool Panel -->
   <aside id="toolPanel">
-    <div class="panel-section">
+    <div class="panel-tabs">
+      <button class="panel-tab active" data-panel="todos">待办</button>
+      <button class="panel-tab" data-panel="history">历史</button>
+    </div>
+    <div class="panel-section panel-active">
       <div class="panel-section-title">待办事项</div>
       <div class="todo-items" id="todoList"></div>
       <div class="todo-add-row">
@@ -92,6 +105,7 @@
 
 <script src="/js/parser-utils.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js"></script>
 <script src="/js/chat.js"></script>
 </body>
 </html>

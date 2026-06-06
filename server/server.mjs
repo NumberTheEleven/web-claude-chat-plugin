@@ -3,7 +3,7 @@ import { readFile, readdir, stat, access, mkdir, writeFile } from 'fs/promises';
 import { createReadStream } from 'fs';
 import { join, extname, resolve } from 'path';
 import { fileURLToPath } from 'url';
-import { spawn } from 'child_process';
+import { spawn, execFileSync } from 'child_process';
 import { lookup } from 'dns/promises';
 import { networkInterfaces } from 'os';
 import { createInterface } from 'readline';
@@ -14,6 +14,20 @@ function validatePathParam(name, value) {
   if (value == null) return true;
   if (value.includes('..') || value.includes('/') || value.includes('\\')) return false;
   return true;
+}
+
+// Strip XML-like tags from text for clean display (preview, history list)
+// Removes <command-message>, <command-name>, <command-args>,
+// <local-command-caveat>, <task-notification>, <system-reminder> etc.
+function stripXmlTags(text) {
+  if (!text || typeof text !== 'string') return text;
+  return text
+    .replace(/<command-message>\s*<command-name>[\s\S]*?<\/command-name>\s*<command-args>([\s\S]*?)<\/command-args>\s*<\/command-message>/g, '$1')
+    .replace(/<local-command-caveat>[\s\S]*?<\/local-command-caveat>/g, '')
+    .replace(/<task-notification>[\s\S]*?<\/task-notification>/g, '')
+    .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '')
+    .replace(/<[^>]+>/g, '') // fallback: strip any remaining angle-bracket tags
+    .trim();
 }
 
 // ---- Config ----
@@ -132,7 +146,8 @@ async function parseSessionFile(filePath, sessionId) {
     }
     rl.close();
     if (!firstUserMsg) return null;
-    return { sessionId, preview: firstUserMsg.slice(0, 150) + (firstUserMsg.length > 150 ? '...' : ''), size };
+    const clean = stripXmlTags(firstUserMsg);
+    return { sessionId, preview: clean.slice(0, 150) + (clean.length > 150 ? '...' : ''), size };
   } catch { return null; }
 }
 
@@ -170,8 +185,10 @@ async function handleQuestions(res, sessionId, project, searchParams) {
             if (t === 'Continue from where you left off.' || t === 'No response requested.') { lineIndex++; continue; }
             if (t.startsWith('<task-notification>') || t.startsWith('<local-command-caveat>')) { lineIndex++; continue; }
             if (t.startsWith('Base directory for this skill:')) { lineIndex++; continue; }
-            const preview = text.length > 150 ? text.substring(0, 150) + '...' : text;
-            questions.push({ index: lineIndex, preview, text });
+            const clean = stripXmlTags(text);
+            if (!clean) { lineIndex++; continue; }
+            const preview = clean.length > 150 ? clean.substring(0, 150) + '...' : clean;
+            questions.push({ index: lineIndex, preview, text: clean });
           }
         }
       } catch {}
@@ -360,17 +377,20 @@ async function handleRequest(req, res, token = null) {
     return;
   }
 
-  // Token validation — when configured, all requests must include valid token
-  if (token && url.searchParams.get('token') !== token) {
+  const path = url.pathname;
+  const method = req.method;
+
+  // Token validation — only for API (except lan-url) and WebSocket, not static files
+  // Skip token check for localhost connections (same machine)
+  const isLocalhost = req.socket && (req.socket.remoteAddress === '127.0.0.1' || req.socket.remoteAddress === '::1' || req.socket.remoteAddress === '::ffff:127.0.0.1');
+  if (!isLocalhost && path.startsWith('/api/') && path !== '/api/lan-url' && token && url.searchParams.get('token') !== token) {
     res.writeHead(403);
     res.end('Forbidden: invalid or missing token');
     return;
   }
 
-  const path = url.pathname;
-  const method = req.method;
-
   // API routes
+  if (path === '/api/lan-url') return jsonResponse(res, { url: lanUrl || null });
   if (path === '/api/projects') return handleProjects(res);
   if (path === '/api/commands') {
     const commands = [
@@ -447,7 +467,8 @@ function setupWebSocket(server, token) {
     try {
       const url = new URL(request.url, 'http://localhost');
       if (url.pathname !== '/ws/chat') { socket.destroy(); return; }
-      if (token && url.searchParams.get('token') !== token) {
+      const wsLocalhost = request.socket.remoteAddress === '127.0.0.1' || request.socket.remoteAddress === '::1' || request.socket.remoteAddress === '::ffff:127.0.0.1';
+      if (!wsLocalhost && token && url.searchParams.get('token') !== token) {
         socket.end('HTTP/1.1 403 Forbidden\r\n\r\n');
         socket.destroy();
         return;
@@ -516,19 +537,81 @@ function setupWebSocket(server, token) {
 }
 
 // ---- Exports for testing ----
-export { handleRequest, validatePathParam };
+export { handleRequest, validatePathParam, getLanAddress, isVirtualIp, addFirewallRule, removeFirewallRule, _setFirewallExecutor, _resetFirewallExecutor };
+
+// Known virtual/VPN network ranges that phones on a real LAN cannot reach
+// - 172.16-31.x: Docker, WSL1, VPN
+// - 192.168.65.x / 192.168.68.x: WSL2 vEthernet (Windows host side)
+// - 169.254.x.x: Link-local (zeroconf, not routable across devices)
+function isVirtualIp(addr) {
+  return /^172\.(1[6-9]|2\d|3[01])\./.test(addr)      // Docker/WSL1/VPN
+      || /^192\.168\.(65|68)\.\d+$/.test(addr)           // WSL2 vEthernet
+      || /^169\.254\.\d+\.\d+$/.test(addr);               // Link-local
+}
 
 function getLanAddress() {
   const ifaces = networkInterfaces();
+  // Prefer non-virtual IPs (real LAN that phones can actually reach)
+  const candidates = [];
   for (const name of Object.keys(ifaces)) {
     for (const iface of ifaces[name]) {
       if (iface.family === 'IPv4' && !iface.internal) {
-        return iface.address;
+        candidates.push({ addr: iface.address, name });
       }
     }
   }
-  return null;
+  const realLan = candidates.find(c => !isVirtualIp(c.addr));
+  return (realLan || candidates[0] || {}).addr || null;
 }
+
+// ---- Windows Firewall Rule Management ----
+
+// Test hook: override executor for unit testing
+let _execFile = execFileSync;
+function _setFirewallExecutor(fn) { _execFile = fn; }
+function _resetFirewallExecutor() { _execFile = execFileSync; }
+
+function firewallRuleName(port) {
+  return 'Claude Chat Server (port:' + port + ')';
+}
+
+function addFirewallRule(port) {
+  if (process.platform !== 'win32') return;
+  const name = firewallRuleName(port);
+  // 1) Delete any leftover rule from a previous crashed process (ignore errors)
+  try {
+    _execFile('netsh', ['advfirewall', 'firewall', 'delete', 'rule', 'name=' + name], { stdio: 'ignore' });
+  } catch { /* rule didn't exist — safe to ignore */ }
+  // 2) Add the new inbound rule
+  try {
+    _execFile('netsh', [
+      'advfirewall', 'firewall', 'add', 'rule',
+      'name=' + name, 'dir=in', 'action=allow', 'protocol=TCP', 'localport=' + port
+    ], { stdio: 'ignore' });
+    console.log('[Firewall] Rule added: ' + name);
+  } catch {
+    const manualCmd = 'netsh advfirewall firewall add rule name="' + name
+      + '" dir=in action=allow protocol=TCP localport=' + port;
+    console.warn('[Firewall] ⚠️ 无法自动添加防火墙规则（可能需要管理员权限）。');
+    console.warn('[Firewall] 手机扫码可能无法连接。请尝试以下操作之一：');
+    console.warn('[Firewall]   1. 以管理员身份重新启动本程序');
+    console.warn('[Firewall]   2. 手动执行: ' + manualCmd);
+  }
+}
+
+function removeFirewallRule(port) {
+  if (process.platform !== 'win32') return;
+  const name = firewallRuleName(port);
+  try {
+    _execFile('netsh', ['advfirewall', 'firewall', 'delete', 'rule', 'name=' + name], { stdio: 'ignore' });
+    console.log('[Firewall] Rule removed: ' + name);
+  } catch {
+    // Silently ignore — rule may already be gone
+  }
+}
+
+// LAN URL shared with API endpoint (set after server starts)
+let lanUrl = null;
 
 // ---- Start ----
 async function main() {
@@ -540,13 +623,31 @@ async function main() {
   server.listen(port, '0.0.0.0', async () => {
     const lanIp = getLanAddress();
     console.log('claude-chat running on port ' + port);
+
+    // Add Windows firewall rule for this port
+    addFirewallRule(port);
+
     if (lanIp) {
-      console.log('LAN: http://' + lanIp + ':' + port + '/?token=' + AUTH_TOKEN);
+      if (isVirtualIp(lanIp)) {
+        console.warn('[LAN] Warning: address ' + lanIp + ' appears to be a virtual/WSL2 network.');
+        console.warn('[LAN] Phone scanning QR code may NOT be able to reach this address.');
+        console.warn('[LAN] Check that your PC has a real LAN/WiFi IP in a different subnet.');
+      }
+      lanUrl = 'http://' + lanIp + ':' + port + '/?token=' + AUTH_TOKEN;
+      console.log('LAN: ' + lanUrl);
+    } else {
+      console.warn('[LAN] No LAN IP found. Phone access via QR code will not work.');
+      console.warn('[LAN] Available non-loopback interfaces: check os.networkInterfaces() output');
     }
     // Write port file
     await mkdir(join(process.env.USERPROFILE, '.claude', 'tmp'), { recursive: true });
     await writeFile(PORT_FILE, String(port), 'utf-8');
   });
+
+  // Clean up firewall rule on graceful shutdown
+  const cleanup = () => { removeFirewallRule(port); };
+  process.on('SIGINT', cleanup);
+  process.on('SIGTERM', cleanup);
 }
 
 // Only start the server when executed directly (not when imported for tests)

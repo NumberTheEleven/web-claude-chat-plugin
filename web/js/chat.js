@@ -62,6 +62,9 @@ const cmdDropdown = document.getElementById('cmdDropdown');
 const historyList = document.getElementById('historyList');
 const mobileTabBar = document.getElementById('mobileTabBar');
 const appEl = document.getElementById('app');
+const headerContext = document.getElementById('headerContext');
+const headerProject = document.getElementById('headerProject');
+const sessionSearchBtn = document.getElementById('sessionSearchBtn');
 
 let SLASH_COMMANDS = [];
 
@@ -91,10 +94,19 @@ if (typeof mermaid !== 'undefined') {
 
 // Parse <command-message> XML tags from user message text
 // Returns { name, args } or null if not a command message
+// Supports both compact (single-line) and multi-line XML tag formats
 function parseCommandMessage(text) {
-  const match = text.match(/<command-message>\s*<command-name>([\s\S]*?)<\/command-name>\s*<command-args>([\s\S]*?)<\/command-args>\s*<\/command-message>/);
-  if (!match) return null;
-  return { name: match[1].trim(), args: match[2].trim() };
+  if (!text || typeof text !== 'string') return null;
+  // Primary: full <command-message> wrapper with name + args
+  let match = text.match(/<command-message>\s*<command-name>([\s\S]*?)<\/command-name>\s*<command-args>([\s\S]*?)<\/command-args>\s*<\/command-message>/);
+  if (match) return { name: match[1].trim(), args: match[2].trim() };
+  // Fallback: bare <command-name>+<command-args> without outer wrapper
+  match = text.match(/<command-name>([\s\S]*?)<\/command-name>\s*<command-args>([\s\S]*?)<\/command-args>/);
+  if (match) return { name: match[1].trim(), args: match[2].trim() };
+  // Fallback: just <command-name> present (no args)
+  match = text.match(/<command-name>([\s\S]*?)<\/command-name>/);
+  if (match) return { name: match[1].trim(), args: '' };
+  return null;
 }
 
 function getCommandGroup(name) {
@@ -171,14 +183,19 @@ async function loadProjects() {
     if (urlProject) {
       state.project = urlProject;
     } else if (!state.project && projects.length > 0) {
-      state.project = projects[0].name;
+      // Skip IP-like or encoded-path names as fallback; pick first valid-looking one
+      const validProject = projects.find(p => !/^\d+\.\d+\.\d+\.\d+$/.test(p.name));
+      state.project = validProject ? validProject.name : projects[0].name;
     }
 
     projects.forEach(p => {
       const opt = document.createElement('option');
       opt.value = p.name;
       opt.textContent = p.path;
-      if (p.name === state.project) opt.selected = true;
+      if (p.name === state.project) {
+        opt.selected = true;
+        state.projectPath = p.path; // Store decoded path for header short name
+      }
       projectPicker.appendChild(opt);
     });
 
@@ -427,6 +444,19 @@ function clearChatUI() {
   updateSessionDisplay();
 }
 
+function showToast(message, duration = 2500) {
+  const toast = document.createElement('div');
+  toast.className = 'toast-notification';
+  toast.textContent = message;
+  toast.style.cssText = 'position:fixed;top:60px;left:50%;transform:translateX(-50%);background:var(--green-bg);color:var(--green-text);border:1px solid var(--green-text);padding:8px 20px;border-radius:4px;font-size:13px;z-index:100;opacity:0;transition:opacity 0.3s;';
+  document.body.appendChild(toast);
+  requestAnimationFrame(() => { toast.style.opacity = '1'; });
+  setTimeout(() => {
+    toast.style.opacity = '0';
+    setTimeout(() => toast.remove(), 300);
+  }, duration);
+}
+
 newSessionBtn.addEventListener('click', () => {
   if (state.pendingSession) {
     state.sessionId = null;
@@ -441,6 +471,7 @@ newSessionBtn.addEventListener('click', () => {
   state.sessionId = null;
   localStorage.removeItem(projectStorageKey('session'));
   clearChatUI();
+  showToast('✨ 新会话已创建，发送消息开始对话');
   refreshSessionList();
 });
 
@@ -464,6 +495,10 @@ async function loadQuestions(limit = 10, before = null) {
     refreshHistory();
   } catch (e) {
     console.error('Failed to load questions', e);
+    // Show error in history panel so mobile users can see something went wrong
+    if (state.questions.length === 0) {
+      refreshHistory();
+    }
   }
 }
 
@@ -680,6 +715,21 @@ function connect() {
 }
 
 function updateSessionDisplay() {
+  // R-040: Show project short name in header
+  if (state.project && headerProject) {
+    const fullPath = state.projectPath || state.project;
+    const parts = fullPath.split(/[/\\]/);
+    const shortName = parts[parts.length - 1] || state.project;
+    // Defensive: never show IP addresses or raw encoded paths in header
+    if (/^\d+\.\d+\.\d+\.\d+$/.test(shortName) || /^[A-Za-z]--/.test(shortName)) {
+      headerProject.textContent = '';
+      headerProject.title = '';
+    } else {
+      headerProject.textContent = shortName;
+      headerProject.title = state.project;
+    }
+  }
+
   if (state.sessionId) {
     const customName = state.sessionNames[state.sessionId];
     if (customName) {
@@ -1440,6 +1490,83 @@ userInput.addEventListener('blur', () => {
   setTimeout(() => cmdDropdown.classList.add('hidden'), 150);
 });
 
+// ====== R-037: Session search ======
+let _sessionSearchMode = false;
+let _sessionSearchInput = null;
+
+function toggleSessionSearch() {
+  _sessionSearchMode = !_sessionSearchMode;
+  if (_sessionSearchMode) {
+    // Insert search input at top of session list
+    _sessionSearchInput = document.createElement('input');
+    _sessionSearchInput.className = 'session-search-input';
+    _sessionSearchInput.placeholder = '搜索会话...';
+    sessionList.insertBefore(_sessionSearchInput, sessionList.firstChild);
+    _sessionSearchInput.focus();
+    _sessionSearchInput.addEventListener('input', onSessionSearchInput);
+    _sessionSearchInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); toggleSessionSearch(); }
+    });
+    sessionSearchBtn.style.opacity = '1';
+  } else {
+    // Remove search input and restore all items
+    if (_sessionSearchInput && _sessionSearchInput.parentNode) {
+      _sessionSearchInput.remove();
+      _sessionSearchInput = null;
+    }
+    // Show all session items again
+    sessionList.querySelectorAll('.session-item').forEach(el => { el.style.display = ''; });
+    // Remove empty state if we added it
+    const emptyHint = sessionList.querySelector('.search-empty-hint');
+    if (emptyHint) emptyHint.remove();
+    sessionSearchBtn.style.opacity = '';
+  }
+}
+
+function onSessionSearchInput(e) {
+  const query = e.target.value.toLowerCase().trim();
+  let hasMatch = false;
+  sessionList.querySelectorAll('.session-item').forEach(el => {
+    // Check preview text and custom name
+    const text = (el.textContent || '').toLowerCase();
+    const match = !query || text.includes(query);
+    el.style.display = match ? '' : 'none';
+    if (match) hasMatch = true;
+  });
+  // Show/hide empty hint
+  let hint = sessionList.querySelector('.search-empty-hint');
+  if (!hasMatch && query && !hint) {
+    hint = document.createElement('div');
+    hint.className = 'search-empty-hint';
+    hint.style.cssText = 'padding:8px 12px;color:var(--text-muted);font-size:12px;text-align:center;';
+    hint.textContent = '无匹配会话';
+    sessionList.appendChild(hint);
+  } else if (hasMatch && hint) {
+    hint.remove();
+  } else if (!query && hint) {
+    hint.remove();
+  }
+}
+
+if (sessionSearchBtn) {
+  sessionSearchBtn.addEventListener('click', toggleSessionSearch);
+}
+
+// ====== R-038: Panel tab switching ======
+document.querySelectorAll('.panel-tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.panel-tab').forEach(t => t.classList.remove('active'));
+    tab.classList.add('active');
+    const targetPanel = tab.dataset.panel; // 'todos' or 'history'
+    document.querySelectorAll('#toolPanel .panel-section').forEach(sec => {
+      sec.classList.toggle('panel-active',
+        (targetPanel === 'todos' && !sec.classList.contains('panel-section-history')) ||
+        (targetPanel === 'history' && sec.classList.contains('panel-section-history'))
+      );
+    });
+  });
+});
+
 // ====== Event listeners ======
 userInput.addEventListener('keydown', (e) => {
   if (cmdDropdownVisible()) {
@@ -1615,6 +1742,90 @@ todoInput.addEventListener('keydown', (e) => {
   }
 });
 
+// ====== R-036: Mobile header context picker ======
+let _mobilePickerOverlay = null;
+
+function showMobilePicker() {
+  // Don't show on desktop
+  if (window.innerWidth >= 769) return;
+
+  if (_mobilePickerOverlay) { closeMobilePicker(); return; }
+
+  const overlay = document.createElement('div');
+  overlay.className = 'mobile-picker-overlay';
+  overlay.innerHTML = `
+    <div class="mobile-picker-backdrop"></div>
+    <div class="mobile-picker-panel">
+      <div class="picker-header">
+        <span>切换项目 / 会话</span>
+        <button class="picker-close" id="pickerCloseBtn">✕</button>
+      </div>
+      <div class="picker-section">
+        <label class="picker-label">项目目录</label>
+        <select id="pickerProjectSelect" class="picker-select">${projectPicker.innerHTML}</select>
+      </div>
+      <div class="picker-section">
+        <label class="picker-label">会话列表</label>
+        <div class="picker-session-list" id="pickerSessionList">加载中...</div>
+      </div>
+      <button class="picker-new-btn" id="pickerNewBtn">+ 新建会话</button>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  _mobilePickerOverlay = overlay;
+
+  // Show overlay — use immediate class + setTimeout as belt-and-suspenders
+  // Browsers need at least one paint frame for the transition from opacity:0 to work
+  overlay.classList.add('visible');
+
+  // Populate session list
+  const sessList = overlay.querySelector('#pickerSessionList');
+  if (sessList) {
+    const items = sessionList.querySelectorAll('.session-item');
+    if (items.length === 0) {
+      sessList.innerHTML = '<div style="padding:12px;color:var(--text-muted);font-size:12px;">暂无会话</div>';
+    } else {
+      items.forEach(item => {
+        const clone = item.cloneNode(true);
+        clone.addEventListener('click', () => {
+          const sid = clone.dataset.sessionId;
+          if (sid) switchSession(sid);
+          closeMobilePicker();
+        });
+        sessList.appendChild(clone);
+      });
+    }
+  }
+
+  // Event handlers
+  overlay.querySelector('#pickerCloseBtn').addEventListener('click', closeMobilePicker);
+  overlay.querySelector('.picker-backdrop').addEventListener('click', closeMobilePicker);
+  overlay.querySelector('#pickerProjectSelect').addEventListener('change', (e) => {
+    window.location.href = '/project/' + encodeURIComponent(e.target.value) + '/';
+  });
+  overlay.querySelector('#pickerNewBtn').addEventListener('click', () => {
+    newSessionBtn.click();
+    closeMobilePicker();
+  });
+}
+
+function closeMobilePicker() {
+  if (_mobilePickerOverlay) {
+    _mobilePickerOverlay.classList.remove('visible');
+    setTimeout(() => {
+      if (_mobilePickerOverlay && _mobilePickerOverlay.parentNode) {
+        _mobilePickerOverlay.remove();
+      }
+      _mobilePickerOverlay = null;
+    }, 200);
+  }
+}
+
+// Attach mobile picker to header — always bind (showMobilePicker has its own width guard)
+if (headerContext) {
+  headerContext.addEventListener('click', showMobilePicker);
+}
+
 // ====== Question history ======
 function refreshHistory() {
   historyList.innerHTML = '';
@@ -1625,7 +1836,12 @@ function refreshHistory() {
   }
 
   state.questions.forEach((q) => {
-    const truncated = q.preview.length > 20 ? q.preview.substring(0, 20) + '...' : q.preview;
+    // Strip XML tags before truncating so preview text is meaningful
+    let cleanPreview = (q.preview || '').replace(/<command-message>\s*<command-name>[\s\S]*?<\/command-name>\s*<command-args>/g, '')
+      .replace(/<\/command-message>/g, '').replace(/<\/command-args>/g, '')
+      .replace(/<[^>]+>/g, '').trim();
+    if (!cleanPreview) cleanPreview = q.preview; // fallback to original
+    const truncated = cleanPreview.length > 22 ? cleanPreview.substring(0, 22) + '...' : cleanPreview;
     const item = document.createElement('div');
     item.className = 'history-item';
     item.title = q.preview;
@@ -1635,6 +1851,8 @@ function refreshHistory() {
       historyList.querySelectorAll('.history-item').forEach(el => el.classList.remove('history-active'));
       item.classList.add('history-active');
       jumpToQuestion(q.index);
+      // Auto switch back to chat tab on mobile
+      switchToMobileTab('chat');
     });
 
     if (q.index === state.oldestQuestionIndex) {
@@ -1672,9 +1890,10 @@ function switchToMobileTab(tab) {
   appEl.classList.remove('mobile-tab-history', 'mobile-tab-todos');
   if (tab === 'history') {
     appEl.classList.add('mobile-tab-history');
-    refreshSessionList();
+    refreshHistory();
   } else if (tab === 'todos') {
     appEl.classList.add('mobile-tab-todos');
+    renderTodos();
   }
   // 'chat' tab = default (no extra class)
 }
@@ -1682,13 +1901,16 @@ function switchToMobileTab(tab) {
 // ====== Keyboard adaptation for mobile ======
 if (window.visualViewport) {
   const vv = window.visualViewport;
+  // R-043: Hide mobile tab bar when keyboard is visible
   const adjustInputForKeyboard = () => {
     const keyboardHeight = window.innerHeight - vv.height;
     if (keyboardHeight > 100) {
       document.body.style.setProperty('--keyboard-height', keyboardHeight + 'px');
+      if (mobileTabBar) mobileTabBar.style.display = 'none';
       messagesEl.scrollTop = messagesEl.scrollHeight;
     } else {
       document.body.style.setProperty('--keyboard-height', '0px');
+      if (mobileTabBar) mobileTabBar.style.display = ''; // restore CSS default
     }
   };
   vv.addEventListener('resize', adjustInputForKeyboard);
@@ -1697,295 +1919,26 @@ if (window.visualViewport) {
 
 // ====== QR Code Generator (pure Canvas API, zero dependencies) ======
 function generateQRCode(text, canvas) {
-  // QR version 6, byte mode, L-level error correction (ECL)
-  // Max data capacity for version 6 byte mode L: 106 bytes
-  const V = 6;
-  const SIZE = 21 + (V - 1) * 4; // 41 modules
-
-  // --- GF(256) arithmetic ---
-  const EXP = new Uint8Array(512);
-  const LOG = new Uint8Array(256);
-  (function initGF() {
-    let x = 1;
-    for (let i = 0; i < 255; i++) {
-      EXP[i] = x;
-      EXP[i + 255] = x;
-      LOG[x] = i;
-      x = (x << 1) ^ ((x & 0x80) ? 0x11d : 0);
-    }
-    LOG[1] = 0;
-  })();
-
-  function gfMul(a, b) {
-    if (a === 0 || b === 0) return 0;
-    return EXP[LOG[a] + LOG[b]];
-  }
-
-  function gfPolyMul(p1, p2) {
-    const out = new Uint8Array(p1.length + p2.length - 1);
-    for (let i = 0; i < p1.length; i++) {
-      for (let j = 0; j < p2.length; j++) {
-        out[i + j] ^= gfMul(p1[i], p2[j]);
-      }
-    }
-    return out;
-  }
-
-  function rsGeneratorPoly(nsym) {
-    let g = new Uint8Array([1]);
-    for (let i = 0; i < nsym; i++) {
-      g = gfPolyMul(g, new Uint8Array([1, EXP[i]]));
-    }
-    return g;
-  }
-
-  function rsEncode(data, nsym) {
-    const gen = rsGeneratorPoly(nsym);
-    const res = new Uint8Array(data.length + nsym);
-    res.set(data);
-    for (let i = 0; i < data.length; i++) {
-      const coef = res[i];
-      if (coef !== 0) {
-        for (let j = 0; j < gen.length; j++) {
-          res[i + j] ^= gfMul(gen[j], coef);
-        }
-      }
-    }
-    res.set(data);
-    return res;
-  }
-
-  // --- Data encoding ---
-  const dataBytes = new TextEncoder().encode(text);
-  if (dataBytes.length > 106) {
-    canvas.getContext('2d').fillText('URL too long', 10, 20);
-    return;
-  }
-  const charCount = dataBytes.length;
-
-  // Byte mode encoding: mode indicator (0100) + count (8 bits) + data bytes
-  const dataBits = [];
-  dataBits.push(0, 1, 0, 0); // 0100 = byte mode
-  for (let i = 7; i >= 0; i--) dataBits.push((charCount >> i) & 1);
-  for (const b of dataBytes) {
-    for (let i = 7; i >= 0; i--) dataBits.push((b >> i) & 1);
-  }
-
-  // Terminator (up to 4 zeros)
-  const totalCodewords = 172; // Version 6 total codewords (L)
-  const ecCodewords = 18;     // Version 6 EC codewords (L)
-  const dataCodewords = totalCodewords - ecCodewords; // 154
-  const requiredBits = dataCodewords * 8;
-  const termBits = Math.min(4, requiredBits - dataBits.length);
-  for (let i = 0; i < termBits; i++) dataBits.push(0);
-
-  // Pad to byte
-  while (dataBits.length % 8 !== 0) dataBits.push(0);
-
-  // Pad bytes (0xEC, 0x11 alternating)
-  const padBytes = [0xEC, 0x11];
-  let pi = 0;
-  while (dataBits.length < requiredBits) {
-    const b = padBytes[pi % 2];
-    for (let i = 7; i >= 0; i--) dataBits.push((b >> i) & 1);
-    pi++;
-  }
-
-  // Convert bits to bytes
-  const msgPoly = new Uint8Array(dataCodewords);
-  for (let i = 0; i < dataCodewords; i++) {
-    let v = 0;
-    for (let j = 0; j < 8; j++) v = (v << 1) | dataBits[i * 8 + j];
-    msgPoly[i] = v;
-  }
-
-  // RS encode
-  const full = rsEncode(msgPoly, ecCodewords);
-
-  // --- Matrix construction ---
-  const matrix = new Uint8Array(SIZE * SIZE);
-  matrix.fill(0xff); // 0xff = unknown (will be set to 0 or 1)
-
-  // Finder patterns
-  function placeFinder(row, col) {
-    for (let r = -1; r <= 7; r++) {
-      for (let c = -1; c <= 7; c++) {
-        const rr = row + r, cc = col + c;
-        if (rr < 0 || rr >= SIZE || cc < 0 || cc >= SIZE) continue;
-        const v = (r >= 0 && r <= 6 && c >= 0 && c <= 6 && (r === 0 || r === 6 || c === 0 || c === 6 || (r >= 2 && r <= 4 && c >= 2 && c <= 4))) ? 1 : 0;
-        matrix[rr * SIZE + cc] = v;
-      }
-    }
-  }
-  placeFinder(0, 0);
-  placeFinder(0, SIZE - 7);
-  placeFinder(SIZE - 7, 0);
-
-  // Timing patterns
-  for (let i = 8; i < SIZE - 8; i++) {
-    matrix[6 * SIZE + i] = i % 2 === 0 ? 1 : 0;
-    matrix[i * SIZE + 6] = i % 2 === 0 ? 1 : 0;
-  }
-
-  // Dark module
-  matrix[(SIZE - 8) * SIZE + 8] = 1;
-
-  // Alignment pattern for version 6 (center at 6, 34)
-  const alignCenters = [6, 34];
-  for (const ar of alignCenters) {
-    for (const ac of alignCenters) {
-      if ((ar === 6 && ac === 6) || (ar === 6 && ac === 34 && false) ||
-          !(ar === 6 && ac === 34) && !(ar === 34 && ac === 6)) {
-        // Place all except those overlapping finders
-        let overlaps = false;
-        // Check overlap with finder at top-left
-        if (ar - 2 < 8 && ac - 2 < 8) overlaps = true;
-        // Check overlap with finder at top-right
-        if (ar - 2 < 8 && ac + 2 >= SIZE - 8) overlaps = true;
-        // Check overlap with finder at bottom-left
-        if (ar + 2 >= SIZE - 8 && ac - 2 < 8) overlaps = true;
-        if (!overlaps) {
-          for (let r = -2; r <= 2; r++) {
-            for (let c = -2; c <= 2; c++) {
-              const rr = ar + r, cc = ac + c;
-              if (rr < 0 || rr >= SIZE || cc < 0 || cc >= SIZE) continue;
-              const v = (r === -2 || r === 2 || c === -2 || c === 2 || (r === 0 && c === 0)) ? 1 : 0;
-              matrix[rr * SIZE + cc] = v;
-            }
-          }
-        }
-      }
-    }
-  }
-
-  // Format info and version info will be placed after mask selection
-  // Place data modules
-  const dataModuleBits = [];
-  for (let i = 0; i < full.length; i++) {
-    for (let j = 7; j >= 0; j--) dataModuleBits.push((full[i] >> j) & 1);
-  }
-
-  // Module placement order (zigzag upward/downward alternating)
-  let bitIdx = 0;
-  let upward = true;
-  for (let col = SIZE - 1; col >= 0; col -= 2) {
-    if (col === 6) col = 5; // Skip timing pattern column
-    const rows = upward
-      ? Array.from({ length: SIZE }, (_, i) => SIZE - 1 - i)
-      : Array.from({ length: SIZE }, (_, i) => i);
-    for (const row of rows) {
-      for (let c = col; c >= col - 1 && c >= 0; c--) {
-        if (c >= SIZE) continue;
-        if (matrix[row * SIZE + c] === 0xff) {
-          matrix[row * SIZE + c] = bitIdx < dataModuleBits.length ? dataModuleBits[bitIdx++] : 0;
-        }
-      }
-    }
-    upward = !upward;
-  }
-
-  // Reserve format info areas
-  function reserveFormatAreas() {
-    for (let i = 0; i <= 8; i++) {
-      if (matrix[i * SIZE + 8] === 0xff) matrix[i * SIZE + 8] = 0;
-      if (i < 9 && matrix[8 * SIZE + i] === 0xff) matrix[8 * SIZE + i] = 0;
-    }
-    for (let i = 0; i <= 7; i++) {
-      if (matrix[(SIZE - 1 - i) * SIZE + 8] === 0xff) matrix[(SIZE - 1 - i) * SIZE + 8] = 0;
-      if (i < 8 && matrix[8 * SIZE + (SIZE - 1 - i)] === 0xff) matrix[8 * SIZE + (SIZE - 1 - i)] = 0;
-    }
-  }
-  reserveFormatAreas();
-
-  // --- Mask pattern evaluation ---
-  const formatInfo = 0x5412; // ECL=L, mask=2
-  // We'll just use mask 2 which works well
-  const maskPattern = 2;
-
-  // Apply mask
-  function maskFn(r, c) {
-    switch (maskPattern) {
-      case 0: return (r + c) % 2 === 0;
-      case 1: return r % 2 === 0;
-      case 2: return c % 3 === 0;
-      case 3: return (r + c) % 3 === 0;
-      case 4: return (Math.floor(r / 2) + Math.floor(c / 3)) % 2 === 0;
-      case 5: return ((r * c) % 2) + ((r * c) % 3) === 0;
-      case 6: return (((r * c) % 2) + ((r * c) % 3)) % 2 === 0;
-      case 7: return (((r + c) % 2) + ((r * c) % 3)) % 2 === 0;
-    }
-    return false;
-  }
-
-  // Apply mask to data modules (skip function patterns)
-  const reserved = new Set();
-  // Mark finders, timing, etc. as reserved
-  for (let r = 0; r < SIZE; r++) {
-    for (let c = 0; c < SIZE; c++) {
-      // Simple heuristic: any non-0xff value was placed by function patterns
-      // But we changed 0xff to 0 for data, so check original finder areas
-      if ((r <= 8 && c <= 8) || (r <= 8 && c >= SIZE - 8) || (r >= SIZE - 8 && c <= 8)) reserved.add(r * SIZE + c);
-      if (r === 6 || c === 6) reserved.add(r * SIZE + c);
-    }
-  }
-
-  // Re-fill data modules (they were set to 0 by reserveFormatAreas)
-  // Actually, let me simplify: just re-do the data placement with mask applied
-  bitIdx = 0;
-  for (let col = SIZE - 1; col >= 0; col -= 2) {
-    if (col === 6) col = 5;
-    for (let row = SIZE - 1; row >= 0; row--) {
-      for (let c = col; c >= col - 1; c--) {
-        if (c < 0 || c >= SIZE) continue;
-        if (matrix[row * SIZE + c] === 0xff) {
-          if (bitIdx < dataModuleBits.length) {
-            let bit = dataModuleBits[bitIdx++];
-            if (maskFn(row, c)) bit ^= 1;
-            matrix[row * SIZE + c] = bit;
-          } else {
-            matrix[row * SIZE + c] = maskFn(row, c) ? 1 : 0;
-          }
-        }
-      }
-    }
-  }
-
-  // Place format info bits
-  function placeFormatInfo(info) {
-    const bits = [];
-    for (let i = 14; i >= 0; i--) bits.push((info >> i) & 1);
-    // Top-left
-    let bi = 0;
-    for (let i = 0; i <= 5; i++) { matrix[i * SIZE + 8] = bits[bi++]; }
-    matrix[7 * SIZE + 8] = bits[bi++];
-    matrix[8 * SIZE + 8] = bits[bi++];
-    matrix[8 * SIZE + 7] = bits[bi++];
-    for (let i = 5; i >= 0; i--) { matrix[8 * SIZE + i] = bits[bi++]; }
-    // Top-right + bottom-left
-    bi = 0;
-    for (let i = SIZE - 1; i >= SIZE - 7; i--) { matrix[8 * SIZE + i] = bits[bi++]; }
-    for (let i = 0; i <= 7; i++) { matrix[(SIZE - 1 - i) * SIZE + 8] = bits[bi++]; }
-  }
-  placeFormatInfo(formatInfo);
-
-  // --- Draw to canvas ---
-  const moduleSize = Math.floor(Math.min(canvas.width, canvas.height) / (SIZE + 8));
-  const offsetX = Math.floor((canvas.width - SIZE * moduleSize) / 2);
-  const offsetY = Math.floor((canvas.height - SIZE * moduleSize) / 2);
+  const qr = qrcode(0, 'M');
+  qr.addData(text);
+  qr.make();
   const ctx = canvas.getContext('2d');
+  const count = qr.getModuleCount();
+  const size = Math.floor(canvas.width / (count + 4));
+  const offset = Math.floor((canvas.width - count * size) / 2);
   ctx.fillStyle = '#ffffff';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
   ctx.fillStyle = '#1e293b';
-  for (let r = 0; r < SIZE; r++) {
-    for (let c = 0; c < SIZE; c++) {
-      if (matrix[r * SIZE + c]) {
-        ctx.fillRect(offsetX + c * moduleSize, offsetY + r * moduleSize, moduleSize, moduleSize);
+  for (let r = 0; r < count; r++) {
+    for (let c = 0; c < count; c++) {
+      if (qr.isDark(r, c)) {
+        ctx.fillRect(offset + c * size, offset + r * size, size, size);
       }
     }
   }
 }
 
-function renderQRCode() {
+async function renderQRCode() {
   // Only show on desktop
   if (window.innerWidth < 769) return;
 
@@ -1998,7 +1951,46 @@ function renderQRCode() {
     document.body.appendChild(qrContainer);
   }
 
-  const lanUrl = window.location.origin + window.location.pathname;
+  // Fetch LAN URL with token from server
+  let lanUrl = null;
+  try {
+    const resp = await fetch(apiUrl('/api/lan-url'));
+    const data = await resp.json();
+    lanUrl = data.url;
+  } catch (_) { /* offline or server error */ }
+
+  // Clear previous content
+  qrContainer.innerHTML = '';
+
+  if (!lanUrl) {
+    const hint = document.createElement('div');
+    hint.textContent = '局域网地址不可用';
+    hint.style.cssText = 'text-align:center;font-size:11px;color:#94a3b8;padding:10px 4px;';
+    qrContainer.appendChild(hint);
+    return;
+  }
+
+  // Construct complete URL with project path and session ID
+  try {
+    const url = new URL(lanUrl);
+
+    // Add project path: /project/<encoded-project>/
+    if (state.project) {
+      const encodedProject = encodeURIComponent(state.project);
+      url.pathname = `/project/${encodedProject}/`;
+    }
+
+    // Add session ID (only when an active session exists)
+    if (state.sessionId) {
+      url.searchParams.set('session', state.sessionId);
+    }
+
+    // Token is already present in lanUrl from /api/lan-url
+    lanUrl = url.toString();
+  } catch (e) {
+    console.error('Failed to construct QR URL', e);
+  }
+
   const size = 150;
   const canvas = document.createElement('canvas');
   canvas.width = size;
@@ -2009,9 +2001,104 @@ function renderQRCode() {
   label.textContent = '📱 扫码访问';
   label.style.cssText = 'text-align:center;font-size:11px;color:#64748b;margin-top:4px;';
 
-  qrContainer.innerHTML = '';
   qrContainer.appendChild(canvas);
   qrContainer.appendChild(label);
+}
+
+// ====== Mermaid Lightbox (click-to-zoom) ======
+let _mermaidOverlay = null;
+let _mermaidCurrentSvg = null;
+
+function createLightbox() {
+  if (_mermaidOverlay) return;
+  _mermaidOverlay = document.createElement('div');
+  _mermaidOverlay.className = 'mermaid-lightbox-overlay';
+  const container = document.createElement('div');
+  container.className = 'mermaid-lightbox-container';
+  const closeBtn = document.createElement('button');
+  closeBtn.className = 'mermaid-lightbox-close';
+  closeBtn.textContent = '×';
+  closeBtn.setAttribute('aria-label', '关闭');
+  container.appendChild(closeBtn);
+  _mermaidOverlay.appendChild(container);
+  document.body.appendChild(_mermaidOverlay);
+
+  _mermaidOverlay.addEventListener('click', (e) => {
+    if (e.target === _mermaidOverlay) closeLightbox();
+  });
+  closeBtn.addEventListener('click', closeLightbox);
+}
+
+function openLightbox(svgEl) {
+  if (!_mermaidOverlay) createLightbox();
+  const container = _mermaidOverlay.querySelector('.mermaid-lightbox-container');
+  const closeBtn = _mermaidOverlay.querySelector('.mermaid-lightbox-close');
+
+  // Remove previous SVG
+  if (_mermaidCurrentSvg) {
+    _mermaidCurrentSvg.remove();
+    _mermaidCurrentSvg = null;
+  }
+
+  // Clone the SVG, strip fixed dimensions so it fills the container
+  const clonedSvg = svgEl.cloneNode(true);
+  clonedSvg.removeAttribute('width');
+  clonedSvg.removeAttribute('height');
+  clonedSvg.setAttribute('width', '100%');
+  clonedSvg.style.width = '100%';
+  clonedSvg.style.height = 'auto';
+  clonedSvg.style.maxWidth = '100%';
+  container.insertBefore(clonedSvg, closeBtn);
+  _mermaidCurrentSvg = clonedSvg;
+  _mermaidOverlay.classList.add('visible');
+}
+
+function closeLightbox() {
+  if (!_mermaidOverlay) return;
+  _mermaidOverlay.classList.remove('visible');
+  const onTransitionEnd = () => {
+    if (_mermaidCurrentSvg) {
+      _mermaidCurrentSvg.remove();
+      _mermaidCurrentSvg = null;
+    }
+    _mermaidOverlay.removeEventListener('transitionend', onTransitionEnd);
+  };
+  _mermaidOverlay.addEventListener('transitionend', onTransitionEnd);
+}
+
+function handleEscKey(e) {
+  if (e.key === 'Escape' && _mermaidOverlay && _mermaidOverlay.classList.contains('visible')) {
+    closeLightbox();
+  }
+}
+
+function bindMermaidClicks() {
+  // Event delegation: catch clicks on mermaid SVGs anywhere in the document
+  document.addEventListener('click', (e) => {
+    // Find the nearest .mermaid-svg wrapper
+    const mermaidSvg = e.target.closest('.mermaid-svg');
+    if (!mermaidSvg) return;
+    const svg = e.target.closest('svg');
+    if (svg) {
+      e.stopPropagation();
+      openLightbox(svg);
+    }
+  });
+
+  // Inject cursor pointer style hint
+  const styleId = 'mermaid-lightbox-cursor';
+  if (!document.getElementById(styleId)) {
+    const style = document.createElement('style');
+    style.id = styleId;
+    style.textContent = '.mermaid-svg svg { cursor: pointer } .mermaid-svg:hover { opacity: 0.92 }';
+    document.head.appendChild(style);
+  }
+}
+
+function initMermaidLightbox() {
+  createLightbox();
+  bindMermaidClicks();
+  document.addEventListener('keydown', handleEscKey);
 }
 
 // ====== Init ======
@@ -2038,8 +2125,13 @@ loadProjects().then(() => {
       });
     });
   }
+
+  // Connect AFTER session state is restored, so ws.onopen can call loadQuestions()
+  connect();
 });
-connect();
+
+// Initialize mermaid lightbox (click-to-zoom)
+initMermaidLightbox();
 
 // Render QR code on desktop; re-render on resize
 renderQRCode();
@@ -2051,4 +2143,6 @@ window.addEventListener('resize', () => {
     if (qr) qr.style.display = '';
     renderQRCode();
   }
+  // R-051: Update header display when crossing 768px breakpoint
+  updateSessionDisplay();
 });
