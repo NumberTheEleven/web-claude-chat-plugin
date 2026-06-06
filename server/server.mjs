@@ -463,6 +463,33 @@ async function handleRequest(req, res, token = null) {
 function setupWebSocket(server, token) {
   const wss = new WebSocketServer({ noServer: true });
 
+  // Group WebSocket clients by "project:sessionId" for cross-device sync
+  const sessionGroups = new Map();
+
+  function addToGroup(key, ws) {
+    if (!sessionGroups.has(key)) sessionGroups.set(key, new Set());
+    sessionGroups.get(key).add(ws);
+  }
+
+  function removeFromGroup(key, ws) {
+    const group = sessionGroups.get(key);
+    if (!group) return;
+    group.delete(ws);
+    if (group.size === 0) sessionGroups.delete(key);
+  }
+
+  // Broadcast event to all clients in the same session group (excluding sender)
+  function broadcastToGroup(key, data, excludeWs) {
+    const group = sessionGroups.get(key);
+    if (!group) return;
+    const msg = typeof data === 'string' ? data : JSON.stringify(data);
+    for (const client of group) {
+      if (client !== excludeWs && client.readyState === WebSocket.OPEN) {
+        client.send(msg);
+      }
+    }
+  }
+
   server.on('upgrade', (request, socket, head) => {
     try {
       const url = new URL(request.url, 'http://localhost');
@@ -483,7 +510,8 @@ function setupWebSocket(server, token) {
 
   wss.on('connection', (ws) => {
     const wsId = randomUUID();
-    
+    let wsGroupKey = null;  // Track which session group this client belongs to
+
     ws.on('message', async (raw) => {
       let data;
       try { data = JSON.parse(raw.toString()); } catch { return; }
@@ -493,6 +521,14 @@ function setupWebSocket(server, token) {
       if (project && !validatePathParam('project', project)) {
         if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'error', message: 'Invalid project parameter' }));
         return;
+      }
+
+      // → Register client in session group for realtime cross-device sync
+      const groupKey = (project || 'default') + ':' + (sessionId || 'new');
+      if (wsGroupKey !== groupKey) {
+        if (wsGroupKey) removeFromGroup(wsGroupKey, ws);
+        addToGroup(groupKey, ws);
+        wsGroupKey = groupKey;
       }
 
       // Resolve project path for correct CWD when spawning Claude
@@ -511,28 +547,44 @@ function setupWebSocket(server, token) {
       proc.stdin.write(userMsg);
       proc.stdin.end();
 
-      // Stream stdout lines as WebSocket events
+      // → Stream stdout lines as WebSocket events — broadcast to ALL clients in the session group
       const rl = createInterface({ input: proc.stdout, crlfDelay: Infinity });
       rl.on('line', (line) => {
         if (!line.trim()) return;
         try {
           const evt = JSON.parse(line);
           if (!evt._sessionId) evt._sessionId = sessionId;
-          if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(evt));
-        } catch { if (ws.readyState === WebSocket.OPEN) ws.send(line); }
+          const evtStr = JSON.stringify(evt);
+          // Send to sender
+          if (ws.readyState === WebSocket.OPEN) ws.send(evtStr);
+          // Broadcast to other clients watching the same session
+          broadcastToGroup(groupKey, evtStr, ws);
+        } catch {
+          if (ws.readyState === WebSocket.OPEN) ws.send(line);
+          broadcastToGroup(groupKey, line, ws);
+        }
       });
-      rl.on('close', () => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'done', _sessionId: sessionId })); });
+      rl.on('close', () => {
+        const done = JSON.stringify({ type: 'done', _sessionId: sessionId });
+        if (ws.readyState === WebSocket.OPEN) ws.send(done);
+        broadcastToGroup(groupKey, done, ws);
+      });
 
       let stderr = '';
       proc.stderr.on('data', (d) => { stderr += d.toString(); });
       proc.on('close', (code) => {
         if (code !== 0) {
-          if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'error', message: 'Claude CLI exited with code ' + code + (stderr ? ' — ' + stderr.slice(0, 300) : ''), _sessionId: sessionId }));
+          const errMsg = JSON.stringify({ type: 'error', message: 'Claude CLI exited with code ' + code + (stderr ? ' — ' + stderr.slice(0, 300) : ''), _sessionId: sessionId });
+          if (ws.readyState === WebSocket.OPEN) ws.send(errMsg);
+          broadcastToGroup(groupKey, errMsg, ws);
         }
       });
     });
 
-    ws.on('close', () => {});
+    ws.on('close', () => {
+      // Clean up: remove client from its session group
+      if (wsGroupKey) removeFromGroup(wsGroupKey, ws);
+    });
   });
 }
 
