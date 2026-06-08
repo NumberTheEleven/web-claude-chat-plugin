@@ -1,7 +1,8 @@
 import { createServer } from 'http';
 import { readFile, readdir, stat, access, mkdir, writeFile } from 'fs/promises';
-import { createReadStream } from 'fs';
-import { join, extname, resolve } from 'path';
+import { createReadStream, watchFile, unwatchFile, openSync, readSync, closeSync, existsSync, statSync } from 'fs';
+import { watch } from 'fs';
+import { join, extname, resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { spawn, execFileSync } from 'child_process';
 import { lookup } from 'dns/promises';
@@ -467,15 +468,20 @@ function setupWebSocket(server, token) {
   const sessionGroups = new Map();
 
   function addToGroup(key, ws) {
-    if (!sessionGroups.has(key)) sessionGroups.set(key, new Set());
+    const isNew = !sessionGroups.has(key);
+    if (isNew) sessionGroups.set(key, new Set());
     sessionGroups.get(key).add(ws);
+    return isNew;
   }
 
   function removeFromGroup(key, ws) {
     const group = sessionGroups.get(key);
     if (!group) return;
     group.delete(ws);
-    if (group.size === 0) sessionGroups.delete(key);
+    if (group.size === 0) {
+      sessionGroups.delete(key);
+      stopWatching(key);
+    }
   }
 
   // Broadcast event to all clients in the same session group (excluding sender)
@@ -489,6 +495,149 @@ function setupWebSocket(server, token) {
       }
     }
   }
+
+  // ---- File watcher for CLI-to-Web realtime sync (R-052 ~ R-058) ----
+  const watchers = new Map(); // groupKey -> { filePath, offset, buffer, watchFileRef, watchRef, paused }
+
+  function getJsonlPath(groupKey) {
+    const idx = groupKey.indexOf(':');
+    if (idx === -1) return null;
+    const project = groupKey.slice(0, idx);
+    const sessionId = groupKey.slice(idx + 1);
+    return join(PROJECTS_DIR, project, sessionId + '.jsonl');
+  }
+
+  function startWatching(groupKey) {
+    if (watchers.has(groupKey)) return;
+    const filePath = getJsonlPath(groupKey);
+    if (!filePath) return;
+
+    // Determine initial offset: start at end of file (don't replay history)
+    let initialOffset = 0;
+    try {
+      initialOffset = statSync(filePath).size;
+    } catch { /* file doesn't exist yet */ }
+
+    const state = {
+      filePath,
+      offset: initialOffset,
+      buffer: '',
+      watchFileRef: null,
+      watchRef: null,
+      paused: false,
+    };
+    watchers.set(groupKey, state);
+
+    // Layer 1: fs.watchFile — cross-platform stat polling (1s interval)
+    state.watchFileRef = watchFile(filePath, { interval: 1000 }, (curr) => {
+      if (state.paused) return;
+      if (curr.size > state.offset) {
+        readNewLines(groupKey);
+      }
+    });
+
+    // Layer 2: fs.watch — event-driven, non-Windows only
+    if (process.platform !== 'win32') {
+      try {
+        if (existsSync(filePath)) {
+          state.watchRef = watch(filePath, (eventType) => {
+            if (state.paused) return;
+            if (eventType === 'change') {
+              try {
+                if (statSync(filePath).size > state.offset) readNewLines(groupKey);
+              } catch { /* file may have been deleted */ }
+            }
+          });
+        }
+      } catch { /* fs.watch may fail on some filesystems */ }
+    }
+
+    console.log('[Watcher] Started:', groupKey, 'offset:', initialOffset);
+  }
+
+  function readNewLines(groupKey) {
+    const state = watchers.get(groupKey);
+    if (!state || state.paused) return;
+
+    let fd;
+    try {
+      const currSize = statSync(state.filePath).size;
+
+      // Handle truncation: file got smaller
+      if (currSize < state.offset) {
+        console.warn('[Watcher] File truncated, resetting offset:', state.filePath);
+        state.offset = 0;
+        state.buffer = '';
+      }
+
+      if (currSize <= state.offset) return;
+
+      const bytesToRead = currSize - state.offset;
+      const buf = Buffer.alloc(bytesToRead);
+      fd = openSync(state.filePath, 'r');
+      readSync(fd, buf, 0, bytesToRead, state.offset);
+      state.offset = currSize;
+
+      const newData = state.buffer + buf.toString('utf-8');
+      const lines = newData.split('\n');
+      state.buffer = lines.pop(); // incomplete trailing line
+
+      if (lines.length > 0) {
+        parseAndBroadcast(groupKey, lines);
+      }
+    } catch (e) {
+      console.warn('[Watcher] Read error:', e.message);
+    } finally {
+      if (fd !== undefined) {
+        try { closeSync(fd); } catch { /* ignore */ }
+      }
+    }
+  }
+
+  function parseAndBroadcast(groupKey, lines) {
+    // Extract sessionId from groupKey ("project:sessionId")
+    const idx = groupKey.indexOf(':');
+    const sessionId = idx !== -1 ? groupKey.slice(idx + 1) : groupKey;
+
+    for (const line of lines) {
+      const event = parseJsonlLine(line);
+      if (!event) continue;
+      event._sessionId = sessionId;
+      // broadcastToGroup sends to ALL clients when excludeWs is null/undefined
+      broadcastToGroup(groupKey, event, null);
+    }
+  }
+
+  function stopWatching(groupKey) {
+    const state = watchers.get(groupKey);
+    if (!state) return;
+    if (state.watchFileRef) {
+      try { unwatchFile(state.filePath, state.watchFileRef); } catch { /* ignore */ }
+    }
+    if (state.watchRef) {
+      try { state.watchRef.close(); } catch { /* ignore */ }
+    }
+    watchers.delete(groupKey);
+    console.log('[Watcher] Stopped:', groupKey);
+  }
+
+  function stopAllWatchers() {
+    for (const key of watchers.keys()) {
+      stopWatching(key);
+    }
+  }
+
+  // Heartbeat: check all watchers for missed changes every 30s
+  const watcherHeartbeat = setInterval(() => {
+    for (const [groupKey, state] of watchers) {
+      if (state.paused) continue;
+      try {
+        if (statSync(state.filePath).size > state.offset) {
+          readNewLines(groupKey);
+        }
+      } catch { /* file may not exist */ }
+    }
+  }, 30000);
 
   server.on('upgrade', (request, socket, head) => {
     try {
@@ -515,6 +664,25 @@ function setupWebSocket(server, token) {
     ws.on('message', async (raw) => {
       let data;
       try { data = JSON.parse(raw.toString()); } catch { return; }
+
+      // Handle join message: register in session group without spawning Claude
+      // (sent on WebSocket connect to receive realtime CLI sync)
+      if (data.type === 'join') {
+        const { sessionId, project } = data;
+        if (project && !validatePathParam('project', project)) return;
+        if (sessionId && !validatePathParam('sessionId', sessionId)) return;
+        if (project && sessionId) {
+          const groupKey = project + ':' + sessionId;
+          if (wsGroupKey !== groupKey) {
+            if (wsGroupKey) removeFromGroup(wsGroupKey, ws);
+            const isNewGroup = addToGroup(groupKey, ws);
+            wsGroupKey = groupKey;
+            if (isNewGroup) startWatching(groupKey);
+          }
+        }
+        return;
+      }
+
       const { text, sessionId, project } = data;
       if (!text) return;
 
@@ -527,14 +695,25 @@ function setupWebSocket(server, token) {
       const groupKey = (project || 'default') + ':' + (sessionId || 'new');
       if (wsGroupKey !== groupKey) {
         if (wsGroupKey) removeFromGroup(wsGroupKey, ws);
-        addToGroup(groupKey, ws);
+        const isNewGroup = addToGroup(groupKey, ws);
         wsGroupKey = groupKey;
+        // Start file watcher for CLI-to-Web sync when first client joins this session
+        if (isNewGroup && project && sessionId) {
+          startWatching(groupKey);
+        }
       }
 
       // Resolve project path for correct CWD when spawning Claude
       let cwd = process.cwd();
       if (project) {
         try { cwd = await resolveProjectPath(project); } catch (e) { console.error('Failed to resolve project path for WebSocket:', project, e.message); }
+      }
+
+      // Pause file watcher during web-spawned Claude stream to avoid duplicate events
+      // (the spawned process writes to JSONL AND streams directly via WS)
+      if (watchers.has(groupKey)) {
+        const wstate = watchers.get(groupKey);
+        wstate.paused = true;
       }
 
       const args = ['-p', '--output-format', 'stream-json', '--input-format', 'stream-json', '--verbose'];
@@ -573,6 +752,15 @@ function setupWebSocket(server, token) {
       let stderr = '';
       proc.stderr.on('data', (d) => { stderr += d.toString(); });
       proc.on('close', (code) => {
+        // Resume file watcher: update offset to skip already-streamed messages, then unpause
+        const wstate = watchers.get(groupKey);
+        if (wstate && wstate.paused) {
+          try {
+            wstate.offset = statSync(wstate.filePath).size;
+          } catch { /* file may not exist */ }
+          wstate.paused = false;
+        }
+
         if (code !== 0) {
           const errMsg = JSON.stringify({ type: 'error', message: 'Claude CLI exited with code ' + code + (stderr ? ' — ' + stderr.slice(0, 300) : ''), _sessionId: sessionId });
           if (ws.readyState === WebSocket.OPEN) ws.send(errMsg);
@@ -586,10 +774,98 @@ function setupWebSocket(server, token) {
       if (wsGroupKey) removeFromGroup(wsGroupKey, ws);
     });
   });
+
+  // Register graceful shutdown for file watchers
+  const cleanupWatchers = () => {
+    stopAllWatchers();
+    clearInterval(watcherHeartbeat);
+  };
+  process.on('SIGINT', cleanupWatchers);
+  process.on('SIGTERM', cleanupWatchers);
+}
+
+// ---- Utility: parse a single JSONL line to a WS event (exported for testing) ----
+function parseJsonlLine(line) {
+  if (!line || !line.trim()) return null;
+  try {
+    const node = JSON.parse(line);
+    const msg = node.message;
+
+    if (!msg) {
+      // Result events (no message wrapper in JSONL)
+      if (node.type === 'result') {
+        return {
+          type: 'result',
+          subtype: node.subtype,
+          num_turns: node.num_turns,
+          duration_ms: node.duration_ms,
+        };
+      }
+
+      // System events (no message wrapper in JSONL)
+      if (node.type === 'system') {
+        return {
+          type: 'system',
+          session_id: node.session_id,
+          ...(node.model ? { model: node.model } : {}),
+        };
+      }
+
+      // Legacy format: role/content at top level
+      if (node.role === 'user') {
+        const text = typeof node.content === 'string' ? node.content
+          : (Array.isArray(node.content) ? node.content.map(b => b.text || '').join(' ') : '');
+        return { type: 'user', message: { role: 'user', content: text } };
+      }
+      if (node.role === 'assistant') {
+        return { type: 'assistant', message: node };
+      }
+      return null;
+    }
+
+    // Standard stream-json format: { message: { role, content: [...] } }
+    const role = msg.role;
+    if (!role) return null;
+
+    if (role === 'user') {
+      const text = typeof msg.content === 'string' ? msg.content
+        : (Array.isArray(msg.content) ? msg.content.map(b => b.text || '').join(' ') : '');
+      return { type: 'user', message: { role: 'user', content: text } };
+    }
+
+    if (role === 'assistant') {
+      return { type: 'assistant', message: msg };
+    }
+
+    // System events (init, session_id)
+    if (node.type === 'system' || msg.type === 'system') {
+      return {
+        type: 'system',
+        session_id: node.session_id || msg.session_id,
+        ...(node.model ? { model: node.model } : {}),
+      };
+    }
+
+    // Result events
+    if (node.type === 'result') {
+      return {
+        type: 'result',
+        subtype: node.subtype,
+        num_turns: node.num_turns,
+        duration_ms: node.duration_ms,
+      };
+    }
+
+    // Generic fallback
+    return { type: role, message: msg };
+  } catch {
+    // JSON parse failed — skip silently (malformed/incomplete line)
+    return null;
+  }
 }
 
 // ---- Exports for testing ----
-export { handleRequest, validatePathParam, getLanAddress, isVirtualIp, addFirewallRule, removeFirewallRule, _setFirewallExecutor, _resetFirewallExecutor };
+export { handleRequest, validatePathParam, getLanAddress, isVirtualIp, addFirewallRule, removeFirewallRule, _setFirewallExecutor, _resetFirewallExecutor, parseJsonlLine };
 
 // Known virtual/VPN network ranges that phones on a real LAN cannot reach
 // - 172.16-31.x: Docker, WSL1, VPN
@@ -696,7 +972,7 @@ async function main() {
     await writeFile(PORT_FILE, String(port), 'utf-8');
   });
 
-  // Clean up firewall rule on graceful shutdown
+  // Clean up firewall rule and file watchers on graceful shutdown
   const cleanup = () => { removeFirewallRule(port); };
   process.on('SIGINT', cleanup);
   process.on('SIGTERM', cleanup);

@@ -1,6 +1,6 @@
 # Requirements Checklist
 
-> Generated: 2026-06-01
+> Generated: 2026-06-01 (updated 2026-06-07)
 > Source: /devflow:clarify → /devflow:breakdown
 
 ## R-014: 命令消息 XML 解析
@@ -521,6 +521,109 @@
 - [ ] 格式如 `web-claude-chat-plugin · 2657ac1e...`
 - [ ] 文字在 375px 屏幕宽度下不换行溢出（text-overflow: ellipsis）
 - [ ] 桌面端 Header 不受影响
+
+---
+
+## R-052: JSONL 文件尾部监听
+
+**Priority:** P0
+**Status:** done
+**Description:** 当 web 客户端通过 WebSocket 连接到某个 session 时，服务端开始监听该 session 对应的 JSONL 文件。每个 session 只启动一次监听（多个客户端共享同一个 watcher）。
+**Depends On:** none
+**Acceptance Criteria:**
+- [ ] WebSocket 客户端加入 session group 时，检查是否已有 watcher，无则创建
+- [ ] watcher 以 `"project:sessionId"` 为 key 管理在 Map 中
+- [ ] JSONL 文件尚不存在时（新 session），监听其父目录等待文件创建
+- [ ] 不修改 web 端发送消息时 spawn `claude` 子进程的现有流程
+
+---
+
+## R-053: 文件位置跟踪
+
+**Priority:** P0
+**Status:** done
+**Description:** 服务端跟踪每个被监听 session 的 JSONL 文件已读取位置（字节偏移）。启动监听时记录当前文件末尾位置，不重放历史消息。
+**Depends On:** R-052
+**Acceptance Criteria:**
+- [ ] 首次监听时，记录当前 `fs.statSync().size` 作为已读位置，不发送历史消息
+- [ ] 每次读取新内容后更新偏移量
+- [ ] 多 session 并发监听时各自独立跟踪位置
+- [ ] 处理文件被 truncate 的情况（文件变小 → 重置偏移到 0）
+
+---
+
+## R-054: 处理文件写入不完整
+
+**Priority:** P0
+**Status:** done
+**Description:** 读取 JSONL 新增内容时以换行符 `\n` 为行边界，不完整的最后一行保留在缓冲区，等下一次检测到完整行时再解析发送。
+**Depends On:** R-052, R-053
+**Acceptance Criteria:**
+- [ ] 读取新增字节后，按 `\n` 分割为完整行和不完整尾部
+- [ ] 完整行逐行解析 JSON 并发送
+- [ ] 不完整尾部保留在 buffer，下次读取时拼接到前面
+- [ ] JSON 解析失败的行记录 `console.warn` 并跳过，不影响后续行
+
+---
+
+## R-055: 新增消息实时广播
+
+**Priority:** P0
+**Status:** done
+**Description:** 检测到 JSONL 新增完整行后，解析每条 JSONL 记录为流式事件，通过 WebSocket 广播给 session group 内所有客户端（CLI 侧无 sender，广播给所有人）。
+**Depends On:** R-053, R-054
+**Acceptance Criteria:**
+- [ ] 解析 JSONL 每行的 `message` 字段，提取 role、content blocks、type 等信息
+- [ ] 转换为与现有 WebSocket 流式事件兼容的格式（`{type, content, ...}`）
+- [ ] 调用 `broadcastToGroup(key, data)` 发送给 session group 内所有客户端（不设 exclude）
+- [ ] 格式不兼容的旧版 JSONL 记录降级为 `{type: "text", content: rawText}` 发送
+- [ ] 解析/发送异常不阻塞 watcher 继续监听
+
+---
+
+## R-056: 多层监听保障（Windows 兼容）
+
+**Priority:** P0
+**Status:** done
+**Description:** 三层机制确保 Windows 平台上不丢事件：主机制 `fs.watchFile` + 辅助心跳 `stat` 检查（30s）+ polling 兜底（2s 间隔）。
+**Depends On:** R-052
+**Acceptance Criteria:**
+- [ ] 优先使用 `fs.watchFile`（轮询式，Windows 上比 `fs.watch` 更可靠）作为主机制
+- [ ] WebSocket 心跳（ping/pong 30s）时触发 `stat` 检查文件大小是否增长
+- [ ] 独立 2s 间隔 polling 兜底（`setInterval`），发现文件变大则触发读取
+- [ ] 三层检测到同一批数据时通过偏移量比较去重（不重复发送）
+- [ ] 非 Windows 平台行为不变（macOS/Linux 仍走 `fs.watch` 优化路径）
+
+---
+
+## R-057: Web 端正确渲染流式事件
+
+**Priority:** P0
+**Status:** done
+**Description:** 前端 `handleEvent()` 正确处理来自广播的流式事件（thinking、tool_use、text、result、done），渲染效果与 web 端自己发消息的展示一致。需处理消息去重——web 端正在流式显示的消息不会被广播重复渲染。
+**Depends On:** R-055
+**Acceptance Criteria:**
+- [ ] `system` 事件：绑定 sessionId（若尚未绑定），标记 session 来源于 CLI sync
+- [ ] `assistant` 事件：thinking 渲染为内联标签行 / tool_use 渲染为工具调用卡片 / text 渲染为消息气泡
+- [ ] `result` 事件：显示完成状态栏（轮次 + 耗时）
+- [ ] `done` 事件：刷新 session 列表
+- [ ] web 端自己发送消息时（`claude` 子进程流），广播回来的同批消息不重复渲染（通过 `_sessionId` + 消息序号/时间戳去重）
+- [ ] PC 端 + H5 均验证通过
+
+---
+
+## R-058: 清理机制
+
+**Priority:** P0
+**Status:** done
+**Description:** session group 中最后一个客户端断开时，停止对该 session 的 JSONL 文件监听，释放 watcher、timer 和 buffer。
+**Depends On:** R-052, R-053
+**Acceptance Criteria:**
+- [ ] 客户端 WebSocket close 时调用 `removeFromGroup(key, ws)`
+- [ ] `removeFromGroup` 检测 group 变空后，停止对应 session 的 `fs.watch`/`fs.watchFile`/polling timer
+- [ ] 清理该 session 的文件偏移量 buffer 和状态
+- [ ] 服务端 SIGINT/SIGTERM 关闭时，遍历清理所有活跃 watcher
+- [ ] 不影响 session group broadcast 现有逻辑
 
 ---
 

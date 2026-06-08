@@ -266,4 +266,42 @@
 
 ---
 
+## T-029: 服务端 watcher 完整实现
+
+**Status:** done
+**Covers:** R-052, R-053, R-054, R-055, R-056, R-058
+**Complexity:** high
+**Files:** server/server.mjs
+**Depends On:** none
+**Description:** 实现 CLI→Web 实时同步的全部服务端逻辑：文件监听、增量读取、JSONL 解析、WS 广播、去重控制、清理机制。
+
+## T-030: 前端广播渲染 + 去重
+
+**Status:** done
+**Covers:** R-057
+**Complexity:** low
+**Files:** web/js/chat.js
+**Depends On:** none
+**Description:** 确保 handleEvent() 正确处理来自 watcher 的广播事件，添加去重逻辑避免 web 自己发消息时重复渲染。
+
+## T-031: 服务端单元测试
+
+**Status:** done
+**Covers:** TC-061, TC-062
+**Complexity:** medium
+**Files:** test/server.test.mjs
+**Depends On:** T-029
+**Description:** 为 parseJsonlLine 编写 14 个单元测试，覆盖标准格式、旧版格式、异常降级等场景。
+
+## T-032: 端到端验证 + 回归
+
+**Status:** done
+**Covers:** TC-068, TC-069, TC-070, TC-073, TC-074, TC-075
+**Complexity:** low
+**Files:** 回归验证
+**Depends On:** T-029, T-030
+**Description:** 运行全部测试（44 server + 10 parser = 54 tests），全部通过。
+
+---
+
 *Tracked by DevFlow. Do not edit manually.*

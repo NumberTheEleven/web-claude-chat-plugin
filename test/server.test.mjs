@@ -381,4 +381,177 @@ describe('Firewall rule management', () => {
   });
 });
 
+// ============================================================
+// parseJsonlLine — CLI-to-Web realtime sync (R-055, TC-061 ~ TC-062)
+// ============================================================
+
+import { parseJsonlLine } from '../server/server.mjs';
+
+describe('parseJsonlLine — JSONL to WS event conversion', () => {
+
+  // TC-061: Standard stream-json format with text content
+  it('should parse standard assistant text event', () => {
+    const line = JSON.stringify({
+      message: {
+        role: 'assistant',
+        content: [{ type: 'text', text: '你好，世界' }]
+      }
+    });
+    const result = parseJsonlLine(line);
+    assert.ok(result);
+    assert.strictEqual(result.type, 'assistant');
+    assert.ok(result.message);
+    assert.strictEqual(result.message.role, 'assistant');
+    assert.strictEqual(result.message.content[0].type, 'text');
+    assert.strictEqual(result.message.content[0].text, '你好，世界');
+  });
+
+  // TC-061: Standard stream-json format with thinking content
+  it('should parse standard assistant thinking event', () => {
+    const line = JSON.stringify({
+      message: {
+        role: 'assistant',
+        content: [{ type: 'thinking', thinking: '让我想想...' }]
+      }
+    });
+    const result = parseJsonlLine(line);
+    assert.ok(result);
+    assert.strictEqual(result.type, 'assistant');
+    assert.strictEqual(result.message.content[0].type, 'thinking');
+    assert.strictEqual(result.message.content[0].thinking, '让我想想...');
+  });
+
+  // TC-061: Standard stream-json format with tool_use content
+  it('should parse standard assistant tool_use event', () => {
+    const line = JSON.stringify({
+      message: {
+        role: 'assistant',
+        content: [{ type: 'tool_use', id: 'tool_001', name: 'read_file', input: { path: '/foo' } }]
+      }
+    });
+    const result = parseJsonlLine(line);
+    assert.ok(result);
+    assert.strictEqual(result.type, 'assistant');
+    assert.strictEqual(result.message.content[0].type, 'tool_use');
+    assert.strictEqual(result.message.content[0].name, 'read_file');
+  });
+
+  // TC-061: Multiple content blocks in one message
+  it('should parse assistant message with multiple content blocks', () => {
+    const line = JSON.stringify({
+      message: {
+        role: 'assistant',
+        content: [
+          { type: 'thinking', thinking: '第一步...' },
+          { type: 'text', text: '回答内容' }
+        ]
+      }
+    });
+    const result = parseJsonlLine(line);
+    assert.ok(result);
+    assert.strictEqual(result.message.content.length, 2);
+    assert.strictEqual(result.message.content[0].type, 'thinking');
+    assert.strictEqual(result.message.content[1].type, 'text');
+  });
+
+  // TC-061: User message format
+  it('should parse user message', () => {
+    const line = JSON.stringify({
+      message: { role: 'user', content: '你好，Claude' }
+    });
+    const result = parseJsonlLine(line);
+    assert.ok(result);
+    assert.strictEqual(result.type, 'user');
+    assert.strictEqual(result.message.content, '你好，Claude');
+  });
+
+  // TC-061: System event with session_id
+  it('should parse system event', () => {
+    const line = JSON.stringify({
+      message: { role: 'system', type: 'system' },
+      type: 'system',
+      session_id: 'abc123-def456',
+      model: 'claude-sonnet-4-6'
+    });
+    const result = parseJsonlLine(line);
+    assert.ok(result);
+    assert.strictEqual(result.type, 'system');
+    assert.strictEqual(result.session_id, 'abc123-def456');
+    assert.strictEqual(result.model, 'claude-sonnet-4-6');
+  });
+
+  // TC-061: Result event
+  it('should parse result event', () => {
+    const line = JSON.stringify({
+      type: 'result',
+      subtype: 'success',
+      num_turns: 3,
+      duration_ms: 4521
+    });
+    const result = parseJsonlLine(line);
+    assert.ok(result);
+    assert.strictEqual(result.type, 'result');
+    assert.strictEqual(result.subtype, 'success');
+    assert.strictEqual(result.num_turns, 3);
+    assert.strictEqual(result.duration_ms, 4521);
+  });
+
+  // TC-062: Legacy format — role/content at top level (no message wrapper)
+  it('should parse legacy user format (role at top level)', () => {
+    const line = JSON.stringify({ role: 'user', content: 'hello' });
+    const result = parseJsonlLine(line);
+    assert.ok(result);
+    assert.strictEqual(result.type, 'user');
+    assert.strictEqual(result.message.content, 'hello');
+  });
+
+  // TC-062: Legacy format — assistant with string content
+  it('should parse legacy assistant format', () => {
+    const line = JSON.stringify({ role: 'assistant', content: 'legacy reply' });
+    const result = parseJsonlLine(line);
+    assert.ok(result);
+    assert.strictEqual(result.type, 'assistant');
+    assert.strictEqual(result.message.role, 'assistant');
+  });
+
+  // TC-062: Empty or whitespace-only line
+  it('should return null for empty line', () => {
+    assert.strictEqual(parseJsonlLine(''), null);
+    assert.strictEqual(parseJsonlLine('   '), null);
+  });
+
+  // TC-062: Malformed JSON
+  it('should return null for malformed JSON', () => {
+    assert.strictEqual(parseJsonlLine('{ not valid json }'), null);
+    assert.strictEqual(parseJsonlLine('just some text'), null);
+  });
+
+  // TC-062: Truncated/incomplete JSON
+  it('should return null for truncated JSON', () => {
+    assert.strictEqual(parseJsonlLine('{"message": {"role": "assistant", "content": ['), null);
+  });
+
+  // TC-062: Unknown message structure
+  it('should return null for unknown message structure', () => {
+    const line = JSON.stringify({ unknown_field: true });
+    const result = parseJsonlLine(line);
+    // No recognized role/type fields → null or generic fallback
+    assert.strictEqual(result, null);
+  });
+
+  // TC-061: User message with array content (multi-block)
+  it('should parse user message with array content', () => {
+    const line = JSON.stringify({
+      message: {
+        role: 'user',
+        content: [{ type: 'text', text: '第一个问题' }, { type: 'text', text: '第二个问题' }]
+      }
+    });
+    const result = parseJsonlLine(line);
+    assert.ok(result);
+    assert.strictEqual(result.type, 'user');
+    assert.strictEqual(result.message.content, '第一个问题 第二个问题');
+  });
+});
+
 console.log('Server tests completed');

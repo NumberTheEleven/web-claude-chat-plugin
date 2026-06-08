@@ -1,8 +1,8 @@
 # Test Cases Checklist
 
-> Generated: 2026-06-01
+> Generated: 2026-06-01 (updated 2026-06-07)
 > Source: /devflow:blueprint
-> Linked Requirements: devflow/requirements.md (R-014 ~ R-018)
+> Linked Requirements: devflow/requirements.md (R-014 ~ R-018, R-052 ~ R-058)
 
 ## TC-001: 标准 command-message 标签解析
 
@@ -854,6 +854,243 @@
 2. 观察 Header 区域
 
 **Expected Result:** 桌面端 Header 显示内容与修改前一致，不显示项目名+会话名格式
+
+---
+
+## CLI → Web 实时同步 测试用例
+
+### TC-061: JSONL 行解析 → WS 事件转换（标准格式）
+
+**Status:** done
+**Covers:** R-055 (新增消息实时广播)
+**Type:** unit
+**Steps:**
+1. 构造标准 JSONL 行：`{"message": {"role": "assistant", "content": [{"type": "text", "text": "你好"}]}}`
+2. 调用事件转换函数
+3. 断言返回 WS 事件包含 `type: "assistant"`, `message.content[0].type: "text"`, `message.content[0].text: "你好"`
+4. 断言事件包含正确的 `_sessionId` 标记
+
+**Expected Result:** JSONL 行正确解析为与 `claude -p --output-format stream-json` 兼容的 WS 事件格式
+
+---
+
+### TC-062: JSONL 行解析降级（旧版/异常格式）
+
+**Status:** done
+**Covers:** R-055 (新增消息实时广播)
+**Type:** unit
+**Steps:**
+1. 传入旧版格式行：`{"role": "user", "content": "hello"}`（无 message 包裹层）
+2. 传入破损 JSON：`{"message": {"role": "assistant", "content": [`（截断）
+3. 分别调用事件转换函数
+
+**Expected Result:** 旧版格式降级为 `{type: "text", content: "hello"}` 发送；破损 JSON 记录 `console.warn` 并跳过（返回 null）
+
+---
+
+### TC-063: 文件偏移量跟踪 — 正常增量读取
+
+**Status:** pending
+**Covers:** R-053 (文件位置跟踪)
+**Type:** unit
+**Steps:**
+1. 模拟文件从 0 字节增长到 100 字节
+2. 调用读取函数，offset=0，读取到 100 字节
+3. 断言 offset 更新为 100
+4. 模拟文件再次增长到 250 字节
+5. 调用读取函数，仅读取 100~250 范围的字节
+6. 断言 offset 更新为 250
+
+**Expected Result:** 每次读取后 offset 正确更新；读取范围精确为 (oldOffset, newSize]
+
+---
+
+### TC-064: 文件被 truncate 时重置 offset
+
+**Status:** pending
+**Covers:** R-053 (文件位置跟踪)
+**Type:** unit
+**Steps:**
+1. 初始 offset=500，buffer=""
+2. 模拟文件 stat.size 变为 200（小于 offset）
+3. 调用读取函数
+4. 断言 offset 重置为 200，buffer 清空，触发 `console.warn`
+
+**Expected Result:** 检测到 truncate 时安全重置，不读取负范围，不清空警告日志
+
+---
+
+### TC-065: 不完整行 buffer 处理
+
+**Status:** pending
+**Covers:** R-054 (处理文件写入不完整)
+**Type:** unit
+**Steps:**
+1. 初始 buffer=""，offset=0
+2. 写入 "line1\nline2_partial"（无结尾换行）
+3. 断言返回完整行 ["line1"]，buffer 更新为 "line2_partial"
+4. 追加写入 "ial_continued\nline3\n"
+5. 断言返回 ["line2_partialial_continued", "line3"]，buffer 清空
+
+**Expected Result:** 完整行按 `\n` 分割返回；不完整尾部保留在 buffer；下次读取时正确拼接
+
+---
+
+### TC-066: Web-spawned claude 期间暂停文件监听
+
+**Status:** pending
+**Covers:** R-055 (去重机制)
+**Type:** unit
+**Steps:**
+1. 模拟 web 客户端发送消息，spawn `claude` 子进程
+2. 断言该 session 的 watcher pause flag 设为 true
+3. 模拟文件变更，调用读取函数
+4. 断言读取被跳过（直接 return，不广播）
+5. 模拟 proc.on('close') 触发
+6. 断言 pause flag 恢复为 false，offset 更新为当前文件大小
+
+**Expected Result:** web 发起消息期间文件监听暂停，避免双重发送；子进程结束后恢复监听
+
+---
+
+### TC-067: 非 Windows 平台 fs.watch 叠加加速
+
+**Status:** pending
+**Covers:** R-056 (多层监听保障)
+**Type:** unit
+**Steps:**
+1. Mock `process.platform = 'darwin'`
+2. 创建 session watcher
+3. 断言同时调用了 `fs.watchFile` 和 `fs.watch`
+4. Mock `process.platform = 'win32'`
+5. 创建 session watcher
+6. 断言仅调用了 `fs.watchFile`，未调用 `fs.watch`
+
+**Expected Result:** macOS/Linux 使用双重监听；Windows 仅使用 `fs.watchFile`
+
+---
+
+### TC-068: Web 端渲染来自广播的 assistant 事件
+
+**Status:** pending
+**Covers:** R-057 (Web 端正确渲染流式事件)
+**Type:** manual
+**Steps:**
+1. 打开 web-chat 到某个 session
+2. 通过服务端模拟发送 WS 事件（或使用浏览器控制台手动 dispatch）：
+   - `{type: "system", session_id: "xxx"}`
+   - `{type: "assistant", message: {content: [{type: "thinking", thinking: "思考中..."}]}}`
+   - `{type: "assistant", message: {content: [{type: "text", text: "你好，这是回复"}]}}`
+   - `{type: "result", subtype: "success", num_turns: 1, duration_ms: 1234}`
+3. 观察页面渲染
+
+**Expected Result:** thinking 显示为内联标签行，text 显示为消息气泡，result 显示为完成状态栏，与 web 端自己发消息的渲染一致
+
+---
+
+### TC-069: 多客户端同时接收 CLI 消息
+
+**Status:** pending
+**Covers:** R-055 (广播) + R-057 (渲染)
+**Type:** manual
+**Steps:**
+1. 桌面浏览器打开 web-chat 进入 session A
+2. 手机扫码打开同一 session A
+3. 在 CLI 中执行 `claude --resume <sessionA_id> -p "介绍一下你自己"`
+4. 观察桌面端和手机端页面
+
+**Expected Result:** 桌面端和手机端几乎同时（<1s 差异）开始显示流式响应，包括 thinking → text → result 完整流程
+
+---
+
+### TC-070: Web 端发消息不被文件广播重复
+
+**Status:** pending
+**Covers:** R-055 (去重) + R-057 (去重渲染)
+**Type:** manual
+**Steps:**
+1. 桌面浏览器打开 web-chat 进入 session，手机也打开同一 session
+2. 桌面端发送消息 "你好"
+3. 观察桌面端和手机端聊天区
+
+**Expected Result:** 桌面端不显示重复消息（去重生效）；手机端正常显示 1 条 AI 回复；两个客户端消息数和内容一致
+
+---
+
+### TC-071: 最后一个客户端断开时停止监听
+
+**Status:** pending
+**Covers:** R-058 (清理机制)
+**Type:** unit
+**Steps:**
+1. 创建 session watcher（模拟客户端加入）
+2. 第二个客户端加入同一 session group
+3. 第一个客户端断开
+4. 断言 watcher 仍在运行（group 非空）
+5. 第二个客户端断开
+6. 断言 `fs.unwatchFile` 被调用，polling timer 清除，watcher state 从 Map 中移除
+
+**Expected Result:** 仅当 group 为空时才停止监听；单客户端断开不影响共享 session 的 watcher
+
+---
+
+### TC-072: 服务端 SIGINT 时清理所有 watcher
+
+**Status:** pending
+**Covers:** R-058 (清理机制)
+**Type:** integration
+**Steps:**
+1. 启动服务端，两个不同 session 各有一个客户端连接
+2. 确认两个 session 的 watcher 都在运行
+3. 发送 SIGINT（Ctrl+C）
+4. 断言所有 `fs.unwatchFile` 被调用，所有 timer 被清除
+
+**Expected Result:** 服务端优雅退出时释放所有文件监听资源
+
+---
+
+### TC-073: CLI → Web 端到端同步
+
+**Status:** pending
+**Covers:** R-052 ~ R-057 (全流程)
+**Type:** e2e
+**Steps:**
+1. 启动 web-claude-chat 服务
+2. 桌面浏览器打开 web-chat，进入 session A
+3. 在另一个终端中执行 `claude --resume <sessionA_id> -p "请用中文回答：1+1等于几？"`
+4. 观察 web 页面是否实时显示 CLI 对话的流式响应
+5. 检查 thinking / text / result 是否完整展示
+6. 检查响应时间（从 CLI 开始输出到 web 开始显示应在 3s 内）
+
+**Expected Result:** web 端在 3 秒内开始显示流式响应，内容完整（thinking → text → result），与 CLI 输出一致
+
+---
+
+### TC-074: 快速连续 10+ 轮对话不丢消息
+
+**Status:** pending
+**Covers:** R-052 ~ R-055 (不丢消息)
+**Type:** e2e
+**Steps:**
+1. 桌面浏览器打开 web-chat 进入 session A
+2. 在 CLI 中快速连续执行 10 次 `claude --resume <sessionA_id> -p "简短回复：第N次对话"`
+3. 等待所有对话完成
+4. 统计 web 端显示的消息轮次
+
+**Expected Result:** web 端显示完整的 10 轮对话，无遗漏（可刷新页面后 check JSONL 行数与 web 显示消息数一致）
+
+---
+
+### TC-075: 现有测试回归
+
+**Status:** done
+**Covers:** R-052 ~ R-058 (全流程回归)
+**Type:** unit
+**Steps:**
+1. 执行 `node --test test/server.test.mjs`
+2. 观察测试结果
+
+**Expected Result:** 现有全部测试通过，无退化
 
 ---
 

@@ -694,6 +694,17 @@ function connect() {
     setStatus(saved || 'idle');
     updateSessionDisplay();
     if (state.sessionId) loadQuestions();
+
+    // Register in session group for realtime CLI-to-Web sync
+    if (state.sessionId && state.project) {
+      try {
+        state.ws.send(JSON.stringify({
+          type: 'join',
+          sessionId: state.sessionId,
+          project: state.project
+        }));
+      } catch { /* ignore send errors during connect */ }
+    }
   };
 
   state.ws.onmessage = (event) => {
