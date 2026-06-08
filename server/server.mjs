@@ -2,7 +2,7 @@ import { createServer } from 'http';
 import { readFile, readdir, stat, access, mkdir, writeFile } from 'fs/promises';
 import { createReadStream, watchFile, unwatchFile, openSync, readSync, closeSync, existsSync, statSync } from 'fs';
 import { watch } from 'fs';
-import { join, extname, resolve, dirname } from 'path';
+import { join, extname, resolve, dirname, sep } from 'path';
 import { fileURLToPath } from 'url';
 import { spawn, execFileSync } from 'child_process';
 import { lookup } from 'dns/promises';
@@ -504,7 +504,10 @@ function setupWebSocket(server, token) {
     if (idx === -1) return null;
     const project = groupKey.slice(0, idx);
     const sessionId = groupKey.slice(idx + 1);
-    return join(PROJECTS_DIR, project, sessionId + '.jsonl');
+    const resolved = resolve(PROJECTS_DIR, project, sessionId + '.jsonl');
+    const root = resolve(PROJECTS_DIR);
+    if (!resolved.startsWith(root + sep)) return null;
+    return resolved;
   }
 
   function startWatching(groupKey) {
@@ -688,6 +691,10 @@ function setupWebSocket(server, token) {
 
       if (project && !validatePathParam('project', project)) {
         if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'error', message: 'Invalid project parameter' }));
+        return;
+      }
+      if (sessionId && !validatePathParam('sessionId', sessionId)) {
+        if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'error', message: 'Invalid sessionId parameter' }));
         return;
       }
 
