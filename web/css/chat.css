@@ -1701,3 +1701,39 @@ h6.md-heading { font-size: 12px; }
     display: none !important;
   }
 }
+
+/* ---- Firewall warning QR container ---- */
+#qrCodeContainer.firewall-warning {
+  background: #fffbeb;
+  border-color: #f59e0b;
+  cursor: default;
+}
+
+.firewall-open-btn {
+  width: 100%;
+  padding: 6px 0;
+  background: #2563eb;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+  margin-top: 4px;
+}
+
+.firewall-open-btn:hover {
+  background: #1d4ed8;
+}
+
+.firewall-open-btn:active {
+  background: #1e40af;
+}
+
+.firewall-warning-text {
+  text-align: center;
+  font-size: 10px;
+  color: #a16207;
+  margin-bottom: 6px;
+  line-height: 1.4;
+  word-break: keep-all;
+}
