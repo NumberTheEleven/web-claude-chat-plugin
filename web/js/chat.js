@@ -1,4 +1,4 @@
-// ====== URL-based project routing ======
+// ====== URL-based session routing ======
 const urlParams = new URLSearchParams(window.location.search);
 const AUTH_TOKEN = urlParams.get('token') || '';
 
@@ -6,11 +6,6 @@ function apiUrl(path) {
   if (!AUTH_TOKEN) return path;
   const sep = path.includes('?') ? '&' : '?';
   return path + sep + 'token=' + encodeURIComponent(AUTH_TOKEN);
-}
-
-function getProjectFromUrl() {
-  const match = window.location.pathname.match(/^\/project\/([^/]+)/);
-  return match ? decodeURIComponent(match[1]) : null;
 }
 
 function projectStorageKey(base) {
@@ -178,15 +173,16 @@ async function loadProjects() {
       return;
     }
 
-    // Resolve project: URL path first, fallback to default
-    const urlProject = getProjectFromUrl();
-    if (urlProject) {
-      state.project = urlProject;
+    // Resolve project: localStorage first, fallback to first valid project
+    const savedProject = localStorage.getItem('currentProject');
+    if (!state.project && savedProject && projects.some(p => p.name === savedProject)) {
+      state.project = savedProject;
     } else if (!state.project && projects.length > 0) {
       // Skip IP-like or encoded-path names as fallback; pick first valid-looking one
       const validProject = projects.find(p => !/^\d+\.\d+\.\d+\.\d+$/.test(p.name));
       state.project = validProject ? validProject.name : projects[0].name;
     }
+    localStorage.setItem('currentProject', state.project);
 
     projects.forEach(p => {
       const opt = document.createElement('option');
@@ -213,10 +209,43 @@ async function loadProjects() {
 projectPicker.addEventListener('change', () => {
   const newProject = projectPicker.value;
   if (newProject !== state.project) {
-    // Navigate to new project URL — triggers page reload with new path
-    window.location.href = '/project/' + encodeURIComponent(newProject) + '/';
+    switchProject(newProject);
   }
 });
+
+async function switchProject(newProject) {
+  // Persist to localStorage
+  localStorage.setItem('currentProject', newProject);
+  state.project = newProject;
+
+  // Update project path from picker options
+  for (const opt of projectPicker.options) {
+    if (opt.value === newProject) { state.projectPath = opt.textContent; break; }
+  }
+
+  // Reset session: load project-scoped session from storage or clear
+  const savedSession = localStorage.getItem(projectStorageKey('session'));
+  state.sessionId = savedSession && validSessionId(savedSession) ? savedSession : null;
+
+  // Clear UI state
+  messagesEl.innerHTML = '';
+  state.questions = [];
+  state.questionsTotal = 0;
+  state.questionsHasMore = false;
+  state.oldestQuestionIndex = null;
+  state.sequenceBuffer = [];
+  state.processing = false;
+  state.sessionNames = {};
+
+  // Reconnect with new project context
+  loadTodos();
+  renderTodos();
+  updateSessionDisplay();
+  refreshSessionList();
+  if (state.ws) { state.ws.close(); }
+  connect();
+  showEmptyState();
+}
 
 // ====== Session list sidebar ======
 async function loadSessionNames() {
@@ -1812,11 +1841,11 @@ function showMobilePicker() {
   overlay.querySelector('#pickerCloseBtn').addEventListener('click', closeMobilePicker);
   overlay.querySelector('.picker-backdrop').addEventListener('click', closeMobilePicker);
   overlay.querySelector('#pickerProjectSelect').addEventListener('change', (e) => {
-    // Preserve token and session from current URL when switching projects
-    const params = new URLSearchParams(window.location.search);
-    let targetUrl = '/project/' + encodeURIComponent(e.target.value) + '/';
-    if (params.toString()) targetUrl += '?' + params.toString();
-    window.location.href = targetUrl;
+    const newProject = e.target.value;
+    if (newProject !== state.project) {
+      switchProject(newProject);
+    }
+    closeMobilePicker();
   });
   overlay.querySelector('#pickerNewBtn').addEventListener('click', () => {
     newSessionBtn.click();
@@ -1961,17 +1990,18 @@ async function renderQRCode() {
   if (!qrContainer) {
     qrContainer = document.createElement('div');
     qrContainer.id = 'qrCodeContainer';
-    qrContainer.style.cssText = 'position:fixed;bottom:20px;right:20px;z-index:50;background:white;padding:10px;border:1px solid var(--border, #e2e8f0);box-shadow:0 2px 8px rgba(0,0,0,0.1);cursor:pointer;';
-    qrContainer.title = '手机扫码访问';
+    qrContainer.style.cssText = 'position:fixed;bottom:20px;right:20px;z-index:50;background:white;padding:12px;border:1px solid var(--border, #e2e8f0);box-shadow:0 2px 8px rgba(0,0,0,0.1);width:170px;min-height:190px;box-sizing:border-box;display:flex;flex-direction:column;align-items:center;justify-content:center;';
     document.body.appendChild(qrContainer);
   }
 
   // Fetch LAN URL with token from server
   let lanUrl = null;
+  let firewallBlocked = false;
   try {
     const resp = await fetch(apiUrl('/api/lan-url'));
     const data = await resp.json();
     lanUrl = data.url;
+    firewallBlocked = data.firewallBlocked;
   } catch (_) { /* offline or server error */ }
 
   // Clear previous content
@@ -1985,15 +2015,12 @@ async function renderQRCode() {
     return;
   }
 
-  // Construct complete URL with project path and session ID
+  // Construct complete URL with session ID as query param (project is in localStorage)
   try {
     const url = new URL(lanUrl);
 
-    // Add project path: /project/<encoded-project>/
-    if (state.project) {
-      const encodedProject = encodeURIComponent(state.project);
-      url.pathname = `/project/${encodedProject}/`;
-    }
+    // Use root path (project is stored in localStorage, not URL)
+    url.pathname = '/';
 
     // Add session ID (only when an active session exists)
     if (state.sessionId) {
@@ -2006,6 +2033,16 @@ async function renderQRCode() {
     console.error('Failed to construct QR URL', e);
   }
 
+  // Check firewall: if blocked, show warning instead of QR code
+  if (firewallBlocked) {
+    renderFirewallWarning(qrContainer, lanUrl);
+    return;
+  }
+
+  renderQRCodeCanvas(qrContainer, lanUrl);
+}
+
+function renderQRCodeCanvas(container, lanUrl) {
   const size = 150;
   const canvas = document.createElement('canvas');
   canvas.width = size;
@@ -2016,8 +2053,101 @@ async function renderQRCode() {
   label.textContent = '📱 扫码访问';
   label.style.cssText = 'text-align:center;font-size:11px;color:#64748b;margin-top:4px;';
 
-  qrContainer.appendChild(canvas);
-  qrContainer.appendChild(label);
+  container.appendChild(canvas);
+  container.appendChild(label);
+}
+
+function renderFirewallWarning(container, lanUrl) {
+  container.classList.add('firewall-warning');
+  container.title = '';
+  container.style.cursor = 'default';
+
+  const icon = document.createElement('div');
+  icon.textContent = '🔒';
+  icon.style.cssText = 'text-align:center;font-size:28px;margin-bottom:4px;';
+
+  const title = document.createElement('div');
+  title.textContent = '扫码不可用';
+  title.style.cssText = 'text-align:center;font-size:12px;font-weight:600;color:#92400e;margin-bottom:2px;';
+
+  const desc = document.createElement('div');
+  desc.textContent = '防火墙未开放';
+  desc.className = 'firewall-warning-text';
+
+  const btn = document.createElement('button');
+  btn.textContent = '🔓 开放端口';
+  btn.className = 'firewall-open-btn';
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    openFirewallPort(container, lanUrl);
+  });
+
+  container.appendChild(icon);
+  container.appendChild(title);
+  container.appendChild(desc);
+  container.appendChild(btn);
+}
+
+async function openFirewallPort(container, lanUrl) {
+  // Show loading
+  container.innerHTML = '';
+  container.classList.add('firewall-warning');
+
+  const spinner = document.createElement('div');
+  spinner.textContent = '⏳';
+  spinner.style.cssText = 'text-align:center;font-size:32px;margin-bottom:6px;';
+
+  const loading = document.createElement('div');
+  loading.textContent = '正在请求权限...';
+  loading.style.cssText = 'text-align:center;font-size:12px;color:#64748b;';
+
+  container.appendChild(spinner);
+  container.appendChild(loading);
+
+  try {
+    const resp = await fetch(apiUrl('/api/open-firewall'), { method: 'POST' });
+    const data = await resp.json();
+
+    if (data.success) {
+      // Firewall opened — re-render with QR code
+      container.innerHTML = '';
+      container.classList.remove('firewall-warning');
+      container.style.cursor = 'pointer';
+      container.title = '手机扫码访问';
+      renderQRCodeCanvas(container, lanUrl);
+    } else {
+      // Failed — show manual instructions
+      container.innerHTML = '';
+      const err = document.createElement('div');
+      err.textContent = '❌';
+      err.style.cssText = 'text-align:center;font-size:32px;margin-bottom:6px;';
+
+      const msg = document.createElement('div');
+      msg.textContent = '权限不足，请以管理员身份运行终端，手动执行：';
+      msg.style.cssText = 'text-align:center;font-size:10px;color:#991b1b;margin-bottom:4px;line-height:1.4;';
+
+      const cmd = document.createElement('code');
+      cmd.textContent = 'netsh advfirewall firewall add rule name="Claude Chat Server (port:50000)" dir=in action=allow protocol=TCP localport=50000';
+      cmd.style.cssText = 'display:block;text-align:left;font-size:9px;color:#991b1b;background:#fee2e2;padding:4px;border-radius:3px;word-break:break-all;margin-bottom:6px;';
+
+      const retry = document.createElement('button');
+      retry.textContent = '🔄 重试';
+      retry.className = 'firewall-open-btn';
+      retry.style.cssText = 'display:block;width:100%;padding:6px 0;background:#2563eb;color:white;border:none;border-radius:4px;font-size:12px;cursor:pointer;';
+      retry.addEventListener('click', (e) => {
+        e.stopPropagation();
+        openFirewallPort(container, lanUrl);
+      });
+
+      container.appendChild(err);
+      container.appendChild(msg);
+      container.appendChild(cmd);
+      container.appendChild(retry);
+    }
+  } catch (e) {
+    console.error('Failed to open firewall:', e);
+    container.innerHTML = '<div style="text-align:center;font-size:11px;color:#991b1b;padding:10px;">请求失败，请检查服务器连接</div>';
+  }
 }
 
 // ====== Mermaid Lightbox (click-to-zoom) ======

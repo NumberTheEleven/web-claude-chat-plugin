@@ -1,12 +1,12 @@
 import { createServer } from 'http';
 import { readFile, readdir, stat, access, mkdir, writeFile } from 'fs/promises';
-import { createReadStream, watchFile, unwatchFile, openSync, readSync, closeSync, existsSync, statSync } from 'fs';
+import { createReadStream, watchFile, unwatchFile, openSync, readSync, closeSync, existsSync, statSync, writeFileSync, unlinkSync } from 'fs';
 import { watch } from 'fs';
 import { join, extname, resolve, dirname, sep } from 'path';
 import { fileURLToPath } from 'url';
-import { spawn, execFileSync } from 'child_process';
+import { spawn, execFileSync, execSync } from 'child_process';
 import { lookup } from 'dns/promises';
-import { networkInterfaces } from 'os';
+import { networkInterfaces, tmpdir } from 'os';
 import { createInterface } from 'readline';
 import { randomUUID } from 'crypto';
 import { WebSocketServer, WebSocket } from 'ws';
@@ -391,7 +391,9 @@ async function handleRequest(req, res, token = null) {
   }
 
   // API routes
-  if (path === '/api/lan-url') return jsonResponse(res, { url: lanUrl || null });
+  if (path === '/api/lan-url') return jsonResponse(res, { url: lanUrl || null, firewallBlocked });
+  if (path === '/api/firewall-status') return handleFirewallStatus(res, serverPort);
+  if (path === '/api/open-firewall' && method === 'POST') return handleOpenFirewall(res, serverPort);
   if (path === '/api/projects') return handleProjects(res);
   if (path === '/api/commands') {
     const commands = [
@@ -448,11 +450,11 @@ async function handleRequest(req, res, token = null) {
 
   // Static files
   if (!path.startsWith('/api/')) {
-    // SPA fallback: /project/** without dots -> index.html
-    if (path.startsWith('/project/') && !path.includes('.')) {
+    // SPA fallback: any path without a file extension -> index.html
+    if (path === '/' || !path.includes('.')) {
       return serveStatic(res, join(WEB_DIR, 'index.html'));
     }
-    const filePath = path === '/' ? join(WEB_DIR, 'index.html') : join(WEB_DIR, path.replace(/^\//, ''));
+    const filePath = join(WEB_DIR, path.replace(/^\//, ''));
     return serveStatic(res, filePath);
   }
 
@@ -878,15 +880,17 @@ export { handleRequest, validatePathParam, getLanAddress, isVirtualIp, addFirewa
 // - 172.16-31.x: Docker, WSL1, VPN
 // - 192.168.65.x / 192.168.68.x: WSL2 vEthernet (Windows host side)
 // - 169.254.x.x: Link-local (zeroconf, not routable across devices)
+// - 198.18-19.x.x: Benchmarking reserved (RFC 2544) — used by Meta Quest, some VPNs
 function isVirtualIp(addr) {
   return /^172\.(1[6-9]|2\d|3[01])\./.test(addr)      // Docker/WSL1/VPN
       || /^192\.168\.(65|68)\.\d+$/.test(addr)           // WSL2 vEthernet
-      || /^169\.254\.\d+\.\d+$/.test(addr);               // Link-local
+      || /^169\.254\.\d+\.\d+$/.test(addr)               // Link-local
+      || /^198\.1[89]\.\d+\.\d+$/.test(addr);            // RFC 2544 benchmark / Meta Quest / VPN
 }
 
 function getLanAddress() {
   const ifaces = networkInterfaces();
-  // Prefer non-virtual IPs (real LAN that phones can actually reach)
+  // Collect all non-internal IPv4 candidates
   const candidates = [];
   for (const name of Object.keys(ifaces)) {
     for (const iface of ifaces[name]) {
@@ -895,6 +899,36 @@ function getLanAddress() {
       }
     }
   }
+
+  // Try to detect the interface with the default gateway (best heuristic for "real" LAN)
+  let gatewayIfAddr = null;
+  try {
+    if (process.platform === 'win32') {
+      const route = execSync('powershell -NoProfile -Command "Get-NetRoute -DestinationPrefix 0.0.0.0/0 | Select-Object -First 1 -ExpandProperty NextHop"', { encoding: 'utf-8', timeout: 2000 }).trim();
+      if (route) {
+        // Find candidate whose subnet contains the gateway
+        const gwParts = route.split('.').map(Number);
+        gatewayIfAddr = candidates.find(c => {
+          const parts = c.addr.split('.').map(Number);
+          return parts[0] === gwParts[0] && parts[1] === gwParts[1] && parts[2] === gwParts[2];
+        });
+      }
+    } else {
+      const route = execSync('ip route show default 2>/dev/null || route -n get default 2>/dev/null', { encoding: 'utf-8', timeout: 2000 }).trim();
+      const match = route.match(/(?:via|gateway)\s+(\d+\.\d+\.\d+\.\d+)/);
+      if (match) {
+        const gw = match[1];
+        const gwParts = gw.split('.').map(Number);
+        gatewayIfAddr = candidates.find(c => {
+          const parts = c.addr.split('.').map(Number);
+          return parts[0] === gwParts[0] && parts[1] === gwParts[1] && parts[2] === gwParts[2];
+        });
+      }
+    }
+  } catch { /* non-critical, fall through */ }
+
+  // Priority: gateway interface that isn't virtual > any non-virtual > first available
+  if (gatewayIfAddr && !isVirtualIp(gatewayIfAddr.addr)) return gatewayIfAddr.addr;
   const realLan = candidates.find(c => !isVirtualIp(c.addr));
   return (realLan || candidates[0] || {}).addr || null;
 }
@@ -910,9 +944,27 @@ function firewallRuleName(port) {
   return 'Claude Chat Server (port:' + port + ')';
 }
 
-function addFirewallRule(port) {
-  if (process.platform !== 'win32') return;
+function firewallRuleExists(port) {
+  if (process.platform !== 'win32') return true;
   const name = firewallRuleName(port);
+  try {
+    execSync('netsh advfirewall firewall show rule name="' + name + '"', { encoding: 'utf-8', stdio: 'pipe', timeout: 3000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function addFirewallRule(port) {
+  if (process.platform !== 'win32') return true;  // non-Windows: no firewall to configure
+  const name = firewallRuleName(port);
+
+  // Check if a rule for this port already exists (user may have added it manually)
+  if (firewallRuleExists(port)) {
+    console.log('[Firewall] Rule already exists: ' + name);
+    return true;
+  }
+
   // 1) Delete any leftover rule from a previous crashed process (ignore errors)
   try {
     _execFile('netsh', ['advfirewall', 'firewall', 'delete', 'rule', 'name=' + name], { stdio: 'ignore' });
@@ -924,6 +976,7 @@ function addFirewallRule(port) {
       'name=' + name, 'dir=in', 'action=allow', 'protocol=TCP', 'localport=' + port
     ], { stdio: 'ignore' });
     console.log('[Firewall] Rule added: ' + name);
+    return true;
   } catch {
     const manualCmd = 'netsh advfirewall firewall add rule name="' + name
       + '" dir=in action=allow protocol=TCP localport=' + port;
@@ -931,6 +984,7 @@ function addFirewallRule(port) {
     console.warn('[Firewall] 手机扫码可能无法连接。请尝试以下操作之一：');
     console.warn('[Firewall]   1. 以管理员身份重新启动本程序');
     console.warn('[Firewall]   2. 手动执行: ' + manualCmd);
+    return false;
   }
 }
 
@@ -945,8 +999,67 @@ function removeFirewallRule(port) {
   }
 }
 
+// ---- On-demand firewall open (UAC elevation) ----
+function handleFirewallStatus(res, serverPort) {
+  jsonResponse(res, { blocked: firewallBlocked, port: serverPort });
+}
+
+function handleOpenFirewall(res, serverPort) {
+  if (process.platform !== 'win32') {
+    firewallBlocked = false;
+    return jsonResponse(res, { success: true, skipped: true });
+  }
+
+  const name = firewallRuleName(serverPort);
+  const ps1Path = join(tmpdir(), 'claude-chat-firewall-' + serverPort + '.ps1');
+
+  try {
+    // Write temp PowerShell script
+    const ps1Content = [
+      '$name = "' + name + '"',
+      '$port = ' + serverPort,
+      'try {',
+      '  netsh advfirewall firewall delete rule name=$name 2>$null',
+      '  netsh advfirewall firewall add rule name=$name dir=in action=allow protocol=TCP localport=$port',
+      '  exit 0',
+      '} catch {',
+      '  exit 1',
+      '}',
+    ].join('\n');
+    writeFileSync(ps1Path, ps1Content, 'utf-8');
+
+    // Run elevated via UAC — use -ArgumentList to pass parameters correctly
+    execSync(
+      'powershell -NoProfile -Command "Start-Process -Verb RunAs -WindowStyle Hidden -Wait -FilePath powershell -ArgumentList \'-NoProfile\',\'-File\',\'' + ps1Path + '\'"',
+      { encoding: 'utf-8', timeout: 60000 }
+    );
+
+    // Verify the rule was actually added
+    try {
+      execSync(
+        'netsh advfirewall firewall show rule name="' + name + '"',
+        { encoding: 'utf-8', stdio: 'pipe', timeout: 5000 }
+      );
+      firewallBlocked = false;
+      console.log('[Firewall] Rule added via UAC: ' + name);
+      jsonResponse(res, { success: true });
+    } catch {
+      // User may have cancelled UAC or rule verification failed
+      jsonResponse(res, { success: false, reason: 'Rule verification failed — user may have cancelled' });
+    }
+  } catch (e) {
+    console.error('[Firewall] UAC elevation failed:', e.message);
+    jsonResponse(res, { success: false, reason: e.message });
+  } finally {
+    // Clean up temp file
+    try { unlinkSync(ps1Path); } catch { /* ignore */ }
+  }
+}
+
 // LAN URL shared with API endpoint (set after server starts)
 let lanUrl = null;
+let firewallBlocked = false;  // true when Windows Firewall blocks the server port
+let serverPort = null;
 
 // ---- Start ----
 async function main() {
@@ -956,11 +1069,12 @@ async function main() {
   setupWebSocket(server, AUTH_TOKEN);
 
   server.listen(port, '0.0.0.0', async () => {
+    serverPort = port;
     const lanIp = getLanAddress();
     console.log('claude-chat running on port ' + port);
 
-    // Add Windows firewall rule for this port
-    addFirewallRule(port);
+    // Try to add Windows firewall rule; track whether it succeeded
+    firewallBlocked = !addFirewallRule(port);
 
     if (lanIp) {
       if (isVirtualIp(lanIp)) {
